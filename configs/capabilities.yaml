@@ -1,0 +1,45 @@
+# SDLC capabilities: the vendor-neutral vocabulary every connector, node, and
+# stage-contract slot is expressed in. Retrieval asks for a capability
+# ("give me this team's DOCUMENTATION"), never for a vendor name.
+#
+# A team's binding (configs/context-spaces/*.yaml) says which vendor product
+# serves which capability for that team. Two teams can serve the same
+# capability from two different vendors (Jira vs ADO) without retrieval code
+# changing at all.
+#
+# `served_by` is informational/documentation only in Phase 0 — it lists which
+# connectors (docs/CONNECTORS.md) are expected to populate nodes carrying this
+# capability. It is not read by any code path.
+
+capabilities:
+  - id: CODE
+    description: Source-controlled repositories and their contents.
+    served_by: [azure_devops, github]
+
+  - id: DOCUMENTATION
+    description: Long-form knowledge — specs, design docs, runbooks, ADRs.
+    served_by: [confluence, notion]
+
+  - id: WORK_MANAGEMENT
+    description: Planned and tracked units of work — epics, stories, tasks, bugs.
+    served_by: [azure_devops, jira, github]
+
+  - id: CHANGE_REVIEW
+    description: Proposed code changes under human review.
+    served_by: [azure_devops, github]
+
+  - id: BUILD_RELEASE
+    description: CI/CD pipelines, builds, and deployments.
+    served_by: [azure_devops, github]
+
+  - id: QUALITY
+    description: Test plans, test cases, and test results.
+    served_by: [azure_devops, github]
+
+  - id: POLICY
+    description: Coding standards, architecture decisions, and governance rules.
+    served_by: [confluence, github]
+
+  - id: COMMUNICATION
+    description: Team chat channels and threads — what was actually discussed, not just what was decided.
+    served_by: [teams, slack]

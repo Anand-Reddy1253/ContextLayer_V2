@@ -1,0 +1,16 @@
+[
+  {
+    "id": "98305",
+    "key": "TALENT",
+    "name": "TalentFlow",
+    "description": "TalentFlow product documentation.",
+    "url": "https://acme.atlassian.net/wiki/spaces/TALENT"
+  },
+  {
+    "id": "98306",
+    "key": "PLAT",
+    "name": "Platform",
+    "description": "Shared platform engineering docs.",
+    "url": "https://acme.atlassian.net/wiki/spaces/PLAT"
+  }
+]

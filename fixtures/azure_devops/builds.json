@@ -1,0 +1,11 @@
+[
+  {
+    "id": 100,
+    "buildNumber": "20260901.1",
+    "status": "completed",
+    "result": "succeeded",
+    "definition": { "id": 7, "name": "identity-service-ci" },
+    "sourceBranch": "refs/heads/main",
+    "url": "https://dev.azure.com/acme/TalentFlow/_build/results?buildId=100"
+  }
+]

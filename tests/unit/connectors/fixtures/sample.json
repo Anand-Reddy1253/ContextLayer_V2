@@ -1,0 +1,4 @@
+[
+  { "native_id": "1", "kind": "TEST", "name": "Alpha" },
+  { "native_id": "2", "kind": "TEST", "name": "Beta" }
+]

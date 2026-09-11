@@ -1,0 +1,30 @@
+# Business-layer seed tree (docs/phases/PHASE-08.md). In v1 this is
+# authored through the UI (Phase 16); this file is what a fresh
+# environment seeds from before that exists, and the reference example
+# catalog/business_tree.py's loader parses. Matches
+# configs/context-spaces/talentflow-identity.yaml's business_ref
+# ("ACME/Engineering/TalentFlow/Identity") exactly, so that context space
+# has a business node to anchor to.
+
+id: ACME
+kind: ORG
+name: ACME
+description: ACME Corp — top-level organization.
+children:
+  - id: Engineering
+    kind: DIVISION
+    name: Engineering
+    children:
+      - id: TalentFlow
+        kind: TRIBE
+        name: TalentFlow
+        description: TalentFlow product line — identity, payments, and core platform services.
+        children:
+          - id: Identity
+            kind: SQUAD
+            name: Identity Squad
+            owners: [identity-squad-lead@acme.example]
+          - id: Payments
+            kind: SQUAD
+            name: Payments Squad
+            owners: [payments-squad-lead@acme.example]

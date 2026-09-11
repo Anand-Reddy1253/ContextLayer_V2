@@ -1,0 +1,54 @@
+{
+  "_comment": "Golden dataset for docs/BENCHMARK.md's empirical pass — real queries against the real, live DevOnHire/TalentFlow workspace (Platform Squad's context space, business_node_id below), hand-verified by reading each result. `expected` is absent for tasks used to document a known failure mode (low precision) rather than to measure recall against a hand-picked answer set.",
+  "business_node_id": "da3c8a8f-a13d-43f1-8b78-08e06474d9fb",
+  "tasks": [
+    {
+      "id": "deploy",
+      "query": "deploy",
+      "description": "Find deployment-related content for DevOnHire",
+      "expected": [
+        { "source_system": "azure_devops", "native_id": "182" },
+        { "source_system": "azure_devops", "native_id": "192" },
+        { "source_system": "confluence", "native_id": "688321" },
+        { "source_system": "confluence", "native_id": "1277974" },
+        { "source_system": "confluence", "native_id": "1015830" }
+      ]
+    },
+    {
+      "id": "adr",
+      "query": "ADR",
+      "description": "Find architecture decision records for DevOnHire",
+      "expected": [
+        { "source_system": "confluence", "native_id": "327898" },
+        { "source_system": "confluence", "native_id": "1146881" },
+        { "source_system": "confluence", "native_id": "327919" },
+        { "source_system": "confluence", "native_id": "1146902" },
+        { "source_system": "confluence", "native_id": "1114305" },
+        { "source_system": "confluence", "native_id": "1179649" }
+      ]
+    },
+    {
+      "id": "skill",
+      "query": "skill",
+      "description": "Find PRs implementing the skill catalogue feature",
+      "expected": [
+        { "source_system": "github", "native_id": "Anand-Reddy1253/TalentFlow#37" },
+        { "source_system": "github", "native_id": "Anand-Reddy1253/TalentFlow#36" },
+        { "source_system": "github", "native_id": "Anand-Reddy1253/TalentFlow#35" },
+        { "source_system": "github", "native_id": "Anand-Reddy1253/TalentFlow#34" },
+        { "source_system": "github", "native_id": "Anand-Reddy1253/TalentFlow#33" },
+        { "source_system": "github", "native_id": "Anand-Reddy1253/TalentFlow#27" },
+        { "source_system": "github", "native_id": "Anand-Reddy1253/TalentFlow#21" },
+        { "source_system": "github", "native_id": "Anand-Reddy1253/TalentFlow#18" },
+        { "source_system": "github", "native_id": "Anand-Reddy1253/TalentFlow#17" },
+        { "source_system": "github", "native_id": "Anand-Reddy1253/TalentFlow#16" }
+      ]
+    },
+    {
+      "id": "candidate",
+      "query": "candidate",
+      "description": "Known low-precision case, documented not scored: a single common word against a recruiting-platform's data hits the server's own 100-result cap. No hand-picked expected set — the point of this task is measuring precision degradation, not recall.",
+      "expected": null
+    }
+  ]
+}

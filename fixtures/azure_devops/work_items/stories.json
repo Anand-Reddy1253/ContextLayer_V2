@@ -1,0 +1,49 @@
+[
+  {
+    "id": 312,
+    "rev": 5,
+    "fields": {
+      "System.WorkItemType": "User Story",
+      "System.Title": "Add SSO callback handling to identity-service",
+      "System.State": "Active",
+      "System.AreaPath": "TalentFlow\\Identity",
+      "System.Parent": 305,
+      "System.Description": "Implement the OAuth2 callback endpoint identity-service needs to complete SSO login, part of AB#301.",
+      "Microsoft.VSTS.Common.AcceptanceCriteria": "Given a valid SSO assertion, the callback endpoint issues a session token and redirects to the app."
+    },
+    "relations": [
+      {
+        "rel": "ArtifactLink",
+        "url": "vstfs:///Git/PullRequestId/identity-service%2F42",
+        "attributes": { "name": "Pull Request" }
+      }
+    ],
+    "url": "https://dev.azure.com/acme/TalentFlow/_workitems/edit/312"
+  },
+  {
+    "id": 313,
+    "rev": 2,
+    "fields": {
+      "System.WorkItemType": "User Story",
+      "System.Title": "Add MFA challenge step to SSO flow",
+      "System.State": "New",
+      "System.AreaPath": "TalentFlow\\Identity",
+      "System.Parent": 305,
+      "System.Description": "Require a second factor before issuing a session token for high-risk sign-ins."
+    },
+    "url": "https://dev.azure.com/acme/TalentFlow/_workitems/edit/313"
+  },
+  {
+    "id": 314,
+    "rev": 1,
+    "fields": {
+      "System.WorkItemType": "User Story",
+      "System.Title": "Write onboarding docs for SSO rollout",
+      "System.State": "New",
+      "System.AreaPath": "TalentFlow\\Identity",
+      "System.Parent": 305,
+      "System.Description": "Document the SSO rollout plan for squads adopting identity-service."
+    },
+    "url": "https://dev.azure.com/acme/TalentFlow/_workitems/edit/314"
+  }
+]

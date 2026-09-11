@@ -1,0 +1,73 @@
+[
+  {
+    "key": "TALENT-1",
+    "project_key": "TALENT",
+    "parent_key": null,
+    "summary": "SSO Epic",
+    "issue_type": "Epic",
+    "status": "In Progress",
+    "assignee": "Priya Shah",
+    "description_text": "Single sign-on rollout for TalentFlow. Design doc references AB#312.",
+    "url": "https://acme.atlassian.net/browse/TALENT-1",
+    "updated": "2026-08-20T10:00:00.000+0000",
+    "issuelinks": []
+  },
+  {
+    "key": "TALENT-2",
+    "project_key": "TALENT",
+    "parent_key": "TALENT-1",
+    "summary": "Implement SAML login flow",
+    "issue_type": "Story",
+    "status": "In Progress",
+    "assignee": "Priya Shah",
+    "description_text": "Implements the SAML flow from PR-42. See acme/talentflow-api#7 for the backend change.",
+    "url": "https://acme.atlassian.net/browse/TALENT-2",
+    "updated": "2026-08-21T09:30:00.000+0000",
+    "issuelinks": [
+      {"type_name": "Blocks", "target_key": "TALENT-3"}
+    ]
+  },
+  {
+    "key": "TALENT-3",
+    "project_key": "TALENT",
+    "parent_key": "TALENT-1",
+    "summary": "SAML redirect loop on Safari",
+    "issue_type": "Bug",
+    "status": "Open",
+    "assignee": "Diego Alvarez",
+    "description_text": "Blocked by the SAML flow work.",
+    "url": "https://acme.atlassian.net/browse/TALENT-3",
+    "updated": "2026-08-22T14:15:00.000+0000",
+    "issuelinks": [
+      {"type_name": "is blocked by", "target_key": "TALENT-2"}
+    ]
+  },
+  {
+    "key": "TALENT-4",
+    "project_key": "TALENT",
+    "parent_key": "TALENT-2",
+    "summary": "Write unit tests for SAML assertion parsing",
+    "issue_type": "Sub-task",
+    "status": "Done",
+    "assignee": "Priya Shah",
+    "description_text": "",
+    "url": "https://acme.atlassian.net/browse/TALENT-4",
+    "updated": "2026-08-21T16:00:00.000+0000",
+    "issuelinks": [
+      {"type_name": "Relates", "target_key": "TALENT-1"}
+    ]
+  },
+  {
+    "key": "PLAT-1",
+    "project_key": "PLAT",
+    "parent_key": null,
+    "summary": "Provision shared CI runners",
+    "issue_type": "Task",
+    "status": "To Do",
+    "assignee": null,
+    "description_text": "Tracking infra work for acme/talentflow-api#7.",
+    "url": "https://acme.atlassian.net/browse/PLAT-1",
+    "updated": "2026-08-18T11:45:00.000+0000",
+    "issuelinks": []
+  }
+]

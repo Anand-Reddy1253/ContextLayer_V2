@@ -1,0 +1,7 @@
+[
+  { "native_id": "TALENT-1", "acl_ref": { "project": "TALENT" } },
+  { "native_id": "TALENT-2", "acl_ref": { "project": "TALENT" } },
+  { "native_id": "TALENT-3", "acl_ref": { "project": "TALENT" } },
+  { "native_id": "TALENT-4", "acl_ref": { "project": "TALENT" } },
+  { "native_id": "PLAT-1", "acl_ref": { "project": "PLAT" } }
+]

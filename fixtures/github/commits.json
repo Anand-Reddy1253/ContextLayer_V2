@@ -1,0 +1,16 @@
+[
+  {
+    "repo": "acme-org/identity-service",
+    "sha": "abc1234",
+    "message": "Implement SSO callback handling (AB#312)",
+    "author": "dev@acme.example",
+    "html_url": "https://github.com/acme-org/identity-service/commit/abc1234"
+  },
+  {
+    "repo": "acme-org/sso-gateway",
+    "sha": "def5678",
+    "message": "Initial gateway scaffolding",
+    "author": "dev@acme.example",
+    "html_url": "https://github.com/acme-org/sso-gateway/commit/def5678"
+  }
+]

@@ -1,0 +1,16 @@
+[
+  {
+    "id": "TalentFlow\\Identity",
+    "name": "Identity",
+    "project": "TalentFlow",
+    "path": "TalentFlow\\Identity",
+    "url": "https://dev.azure.com/acme/TalentFlow/_apis/wit/classificationNodes/Areas/Identity"
+  },
+  {
+    "id": "TalentFlow\\Payments",
+    "name": "Payments",
+    "project": "TalentFlow",
+    "path": "TalentFlow\\Payments",
+    "url": "https://dev.azure.com/acme/TalentFlow/_apis/wit/classificationNodes/Areas/Payments"
+  }
+]

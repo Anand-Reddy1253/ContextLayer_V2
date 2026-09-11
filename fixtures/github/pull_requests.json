@@ -1,0 +1,22 @@
+[
+  {
+    "repo": "acme-org/identity-service",
+    "number": 7,
+    "title": "Implement SSO callback endpoint",
+    "body": "Adds the OAuth2 callback handler. Fixes AB#312.",
+    "state": "open",
+    "head_ref": "feature/sso-callback",
+    "base_ref": "main",
+    "html_url": "https://github.com/acme-org/identity-service/pull/7"
+  },
+  {
+    "repo": "acme-org/identity-service",
+    "number": 8,
+    "title": "AB#401 Assign roles to a user profile",
+    "body": "",
+    "state": "open",
+    "head_ref": "feature/assign-roles",
+    "base_ref": "main",
+    "html_url": "https://github.com/acme-org/identity-service/pull/8"
+  }
+]

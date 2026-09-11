@@ -1,0 +1,11 @@
+[
+  {
+    "repo": "acme-org/identity-service",
+    "run_id": 555,
+    "name": "CI",
+    "status": "completed",
+    "conclusion": "success",
+    "head_sha": "abc1234",
+    "html_url": "https://github.com/acme-org/identity-service/actions/runs/555"
+  }
+]

@@ -1,0 +1,12 @@
+[
+  {
+    "pullRequestId": 42,
+    "title": "Implement SSO callback endpoint (AB#312)",
+    "description": "Adds POST /auth/sso/callback. Fixes AB#312.",
+    "status": "active",
+    "repository": { "id": "identity-service", "name": "identity-service" },
+    "sourceRefName": "refs/heads/feature/sso-callback",
+    "targetRefName": "refs/heads/main",
+    "url": "https://dev.azure.com/acme/TalentFlow/_git/identity-service/pullrequest/42"
+  }
+]

@@ -1,0 +1,7 @@
+[
+  {
+    "native_id": "acme-org/identity-service@main:src/sso/callback.py",
+    "mime_type": "text/x-python",
+    "text": "async def handle_sso_callback(request):\n    assertion = request.form['SAMLResponse']\n    return issue_session(assertion)\n"
+  }
+]

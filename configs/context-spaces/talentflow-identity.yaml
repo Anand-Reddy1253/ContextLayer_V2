@@ -1,0 +1,59 @@
+# Example logical-layer context space. In v1 these are authored through the
+# UI (docs/UI.md) and persisted to the `context_space` / `binding` tables
+# (docs/persistence.md) — this file is a worked example used by fixtures and
+# acceptance tests, and a reference for the shape the UI writes.
+#
+# A context space is the human decision that answers: "for this
+# business scope, which native locations across which connectors count as
+# in-boundary?" It is what turns a team name into a searchable boundary.
+
+id: talentflow/identity
+name: TalentFlow — Identity Squad
+description: >
+  Identity and access management capability within the TalentFlow product
+  line. Owns authentication, SSO, and account provisioning services.
+
+# Business-layer anchor this context space represents.
+business_ref:
+  org: ACME
+  path: ACME/Engineering/TalentFlow/Identity   # matches node.path (ltree) on the business layer
+
+owners:
+  - identity-squad-lead@acme.example
+
+product: talentflow
+teams: [identity-squad]
+services: [identity-service, sso-gateway]
+
+status: active
+version: 1
+
+# Bindings: source-specific locations mapped into this context space.
+# Each entry names a capability (configs/capabilities.yaml) served by one
+# connector instance, and the native container that scopes the boundary.
+# See docs/CONNECTORS.md "native hierarchy" section for what a container
+# path means per source.
+bindings:
+  - capability: CODE
+    source_system: github
+    source_instance_id: github-acme
+    native_container: "acme-org/identity-service"        # org/repo
+    origin: HUMAN
+
+  - capability: CODE
+    source_system: github
+    source_instance_id: github-acme
+    native_container: "acme-org/sso-gateway"
+    origin: HUMAN
+
+  - capability: WORK_MANAGEMENT
+    source_system: azure_devops
+    source_instance_id: ado-acme
+    native_container: "TalentFlow\\Identity"              # project\area-path
+    origin: HUMAN
+
+  - capability: DOCUMENTATION
+    source_system: confluence
+    source_instance_id: confluence-acme
+    native_container: "PLATFORM/Identity"                 # space/root-page
+    origin: HUMAN

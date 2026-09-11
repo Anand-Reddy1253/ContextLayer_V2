@@ -1,0 +1,28 @@
+[
+  {
+    "id": 301,
+    "rev": 3,
+    "fields": {
+      "System.WorkItemType": "Epic",
+      "System.Title": "Modernize Identity & Access Management",
+      "System.State": "Active",
+      "System.AreaPath": "TalentFlow\\Identity",
+      "System.Description": "Consolidate SSO, provisioning, and access review under one identity platform.",
+      "System.AssignedTo": "identity-squad-lead@acme.example"
+    },
+    "url": "https://dev.azure.com/acme/TalentFlow/_workitems/edit/301"
+  },
+  {
+    "id": 350,
+    "rev": 1,
+    "fields": {
+      "System.WorkItemType": "Epic",
+      "System.Title": "Payments Reconciliation Overhaul",
+      "System.State": "Active",
+      "System.AreaPath": "TalentFlow\\Payments",
+      "System.Description": "Rebuild the nightly reconciliation pipeline for accuracy and auditability.",
+      "System.AssignedTo": "payments-squad-lead@acme.example"
+    },
+    "url": "https://dev.azure.com/acme/TalentFlow/_workitems/edit/350"
+  }
+]

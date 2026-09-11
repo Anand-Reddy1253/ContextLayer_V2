@@ -1,0 +1,46 @@
+# --- secrets: never commit ---
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+secrets/
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+dist/
+build/
+
+# --- Node / UI ---
+ui/node_modules/
+ui/dist/
+ui/.vite/
+npm-debug.log*
+pnpm-debug.log*
+
+# --- Docker / local data ---
+.docker-data/
+pgdata/
+
+# --- editors / OS ---
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# --- logs / scratch ---
+*.log
+.tmp/
+
+# --- Claude Code runtime state (not source) ---
+.claude/scheduled_tasks.lock

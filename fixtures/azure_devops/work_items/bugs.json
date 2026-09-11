@@ -1,0 +1,15 @@
+[
+  {
+    "id": 340,
+    "rev": 2,
+    "fields": {
+      "System.WorkItemType": "Bug",
+      "System.Title": "SSO callback returns 500 when assertion is expired",
+      "System.State": "Active",
+      "System.AreaPath": "TalentFlow\\Identity",
+      "System.Parent": 305,
+      "System.Description": "Expired SAML assertions cause an unhandled exception instead of a clean re-auth redirect. Regression from AB#312 — see that story for the original implementation."
+    },
+    "url": "https://dev.azure.com/acme/TalentFlow/_workitems/edit/340"
+  }
+]

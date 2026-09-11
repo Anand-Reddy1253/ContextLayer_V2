@@ -1,0 +1,14 @@
+[
+  {
+    "key": "TALENT",
+    "name": "TalentFlow",
+    "description": "TalentFlow product",
+    "url": "https://acme.atlassian.net/browse/TALENT"
+  },
+  {
+    "key": "PLAT",
+    "name": "Platform Engineering",
+    "description": "Shared platform services",
+    "url": "https://acme.atlassian.net/browse/PLAT"
+  }
+]

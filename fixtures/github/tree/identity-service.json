@@ -1,0 +1,10 @@
+[
+  { "path": "README.md", "type": "blob" },
+  { "path": "src", "type": "tree" },
+  { "path": "src/main.py", "type": "blob" },
+  { "path": "src/sso", "type": "tree" },
+  { "path": "src/sso/callback.py", "type": "blob" },
+  { "path": "src/sso/mfa.py", "type": "blob" },
+  { "path": "tests", "type": "tree" },
+  { "path": "tests/test_callback.py", "type": "blob" }
+]

@@ -1,0 +1,16 @@
+[
+  {
+    "id": "9001",
+    "issue_key": "TALENT-2",
+    "body_text": "Verified against AB#312 in staging.",
+    "author": "Diego Alvarez",
+    "url": "https://acme.atlassian.net/browse/TALENT-2?focusedCommentId=9001"
+  },
+  {
+    "id": "9002",
+    "issue_key": "TALENT-3",
+    "body_text": "Repro steps attached, see PR-42 for the related change.",
+    "author": "Diego Alvarez",
+    "url": "https://acme.atlassian.net/browse/TALENT-3?focusedCommentId=9002"
+  }
+]

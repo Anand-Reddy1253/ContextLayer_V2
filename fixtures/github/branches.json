@@ -1,0 +1,4 @@
+[
+  { "repo": "acme-org/identity-service", "name": "main", "commit_sha": "abc1234" },
+  { "repo": "acme-org/sso-gateway", "name": "main", "commit_sha": "def5678" }
+]

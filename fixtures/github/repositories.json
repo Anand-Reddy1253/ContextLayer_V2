@@ -1,0 +1,18 @@
+[
+  {
+    "full_name": "acme-org/identity-service",
+    "name": "identity-service",
+    "owner": "acme-org",
+    "default_branch": "main",
+    "description": "Identity and SSO service for TalentFlow.",
+    "html_url": "https://github.com/acme-org/identity-service"
+  },
+  {
+    "full_name": "acme-org/sso-gateway",
+    "name": "sso-gateway",
+    "owner": "acme-org",
+    "default_branch": "main",
+    "description": "Edge gateway that fronts SSO traffic.",
+    "html_url": "https://github.com/acme-org/sso-gateway"
+  }
+]

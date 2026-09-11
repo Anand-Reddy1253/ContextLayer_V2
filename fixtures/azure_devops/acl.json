@@ -1,0 +1,11 @@
+[
+  { "native_id": "301", "acl_ref": { "project": "TalentFlow", "group": "identity-squad" } },
+  { "native_id": "305", "acl_ref": { "project": "TalentFlow", "group": "identity-squad" } },
+  { "native_id": "312", "acl_ref": { "project": "TalentFlow", "group": "identity-squad" } },
+  { "native_id": "313", "acl_ref": { "project": "TalentFlow", "group": "identity-squad" } },
+  { "native_id": "314", "acl_ref": { "project": "TalentFlow", "group": "identity-squad" } },
+  { "native_id": "340", "acl_ref": { "project": "TalentFlow", "group": "identity-squad" } },
+  { "native_id": "350", "acl_ref": { "project": "TalentFlow", "group": "payments-squad" } },
+  { "native_id": "PR-42", "acl_ref": { "project": "TalentFlow", "group": "identity-squad" } },
+  { "native_id": "BUILD-100", "acl_ref": { "project": "TalentFlow", "group": "identity-squad" } }
+]

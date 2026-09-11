@@ -1,0 +1,14 @@
+[
+  {
+    "id": "19:identity-squad@thread.tacv2",
+    "displayName": "identity-squad",
+    "description": "Identity Squad's main channel",
+    "webUrl": "https://teams.microsoft.com/l/channel/identity-squad"
+  },
+  {
+    "id": "19:platform-eng@thread.tacv2",
+    "displayName": "platform-eng",
+    "description": "Platform Engineering discussion",
+    "webUrl": "https://teams.microsoft.com/l/channel/platform-eng"
+  }
+]

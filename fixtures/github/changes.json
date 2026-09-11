@@ -1,0 +1,15 @@
+{
+  "items": [
+    {
+      "native_id": "acme-org/identity-service@main:src/sso/callback.py",
+      "kind": "FILE",
+      "changeType": "updated"
+    },
+    {
+      "native_id": "acme-org/identity-service@main:src/sso/legacy_callback.py",
+      "kind": "FILE",
+      "changeType": "deleted"
+    }
+  ],
+  "next_cursor": null
+}

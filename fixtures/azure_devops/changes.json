@@ -1,0 +1,7 @@
+{
+  "items": [
+    { "id": 340, "workItemType": "Bug", "changedDate": "2026-08-20T10:00:00Z", "changeType": "updated" },
+    { "id": 299, "workItemType": "User Story", "changedDate": "2026-08-18T09:00:00Z", "changeType": "deleted" }
+  ],
+  "next_cursor": null
+}

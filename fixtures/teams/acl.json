@@ -1,0 +1,6 @@
+[
+  { "native_id": "1700000000001", "acl_ref": { "channel": "19:identity-squad@thread.tacv2" } },
+  { "native_id": "1700000000002", "acl_ref": { "channel": "19:identity-squad@thread.tacv2" } },
+  { "native_id": "1700000000003", "acl_ref": { "channel": "19:identity-squad@thread.tacv2" } },
+  { "native_id": "1700000000010", "acl_ref": { "channel": "19:platform-eng@thread.tacv2" } }
+]

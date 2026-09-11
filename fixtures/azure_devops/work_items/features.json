@@ -1,0 +1,15 @@
+[
+  {
+    "id": 305,
+    "rev": 2,
+    "fields": {
+      "System.WorkItemType": "Feature",
+      "System.Title": "Single Sign-On for TalentFlow apps",
+      "System.State": "Active",
+      "System.AreaPath": "TalentFlow\\Identity",
+      "System.Parent": 301,
+      "System.Description": "Enable SSO login across TalentFlow's web apps via the identity-service."
+    },
+    "url": "https://dev.azure.com/acme/TalentFlow/_workitems/edit/305"
+  }
+]

@@ -1,0 +1,254 @@
+# Stage contracts — pure configuration consumed by
+# src/context_fabric/retrieval/contracts.py (Phase 10). The compiler is
+# generic; it never special-cases a stage name. Adding or changing a stage
+# is a config change, not a code change.
+#
+# Each slot:
+#   name            unique within the stage; becomes a key in ContextPack
+#   description     shown in docs/tools, not sent to the model
+#   node_kinds      node.kind values this slot may be filled from
+#   capability      capabilities.yaml id the slot's evidence must carry (optional)
+#   traversal       edge types (graph/traversal.py) followed from scope roots,
+#                   and max hop distance
+#   required        true => an empty slot after ranking becomes a conflict /
+#                   open_question, never a silent omission
+#   max_items       cap on returned nodes for this slot
+#   token_share     relative weight used to split token_budget across slots
+#   max_age_days    evidence older than this is flagged in `freshness`,
+#                   triggers refresh_evidence before an actionable decision
+#
+# See docs/RETRIEVAL.md for the compiler algorithm and docs/MCP.md for how
+# `get_context_pack(stage=...)` selects a contract by name.
+
+stages:
+  requirement:
+    slots:
+      - name: work_item_hierarchy
+        description: The work item itself plus its parent/child chain.
+        node_kinds: [EPIC, FEATURE, STORY, TASK, BUG, WORK_ITEM]
+        capability: WORK_MANAGEMENT
+        traversal: { edge_types: [CONTAINS, BELONGS_TO], max_hops: 4, direction: both }
+        required: true
+        max_items: 15
+        token_share: 20
+
+      - name: product_and_service
+        description: Business product/service the work item belongs to.
+        node_kinds: [PRODUCT, SERVICE]
+        traversal: { edge_types: [HAS_SERVICE, BELONGS_TO], max_hops: 3, direction: up }
+        required: true
+        max_items: 5
+        token_share: 10
+
+      - name: applicable_policies
+        description: Coding standards / governance that apply to this scope.
+        node_kinds: [POLICY_DOCUMENT]
+        capability: POLICY
+        traversal: { edge_types: [RELATED_TO, CONTAINS], max_hops: 3, direction: any }
+        required: true
+        max_items: 10
+        token_share: 15
+
+      - name: related_approved_requirements
+        description: Other requirements in-scope that this one relates to or depends on.
+        node_kinds: [WORK_ITEM]
+        traversal: { edge_types: [DEPENDS_ON, RELATED_TO], max_hops: 2, direction: any }
+        required: false
+        max_items: 10
+        token_share: 15
+
+      - name: explicitly_linked_documents
+        description: Documents the work item text explicitly links or mentions.
+        node_kinds: [PAGE, DOCUMENT]
+        capability: DOCUMENTATION
+        traversal: { edge_types: [MENTIONS, SPECIFIED_BY], max_hops: 2, direction: any }
+        required: true
+        max_items: 15
+        token_share: 25
+
+  design:
+    slots:
+      - name: approved_requirement
+        node_kinds: [WORK_ITEM, DOCUMENT]
+        traversal: { edge_types: [SPECIFIED_BY, IMPLEMENTS], max_hops: 3, direction: any }
+        required: true
+        max_items: 5
+        token_share: 20
+
+      - name: architecture_decisions
+        node_kinds: [DOCUMENT]
+        capability: POLICY
+        traversal: { edge_types: [RELATED_TO, MENTIONS], max_hops: 3, direction: any }
+        required: true
+        max_items: 10
+        token_share: 20
+
+      - name: service_repository_mapping
+        node_kinds: [SERVICE, REPOSITORY]
+        traversal: { edge_types: [HAS_SERVICE, IMPLEMENTED_BY], max_hops: 3, direction: any }
+        required: true
+        max_items: 10
+        token_share: 15
+
+      - name: api_schema_references
+        node_kinds: [DOCUMENT, FILE]
+        traversal: { edge_types: [MENTIONS, RELATED_TO], max_hops: 3, direction: any }
+        required: false
+        max_items: 10
+        token_share: 15
+
+      - name: dependencies
+        node_kinds: [SERVICE, REPOSITORY, WORK_ITEM]
+        traversal: { edge_types: [DEPENDS_ON], max_hops: 3, direction: any }
+        required: false
+        max_items: 15
+        token_share: 15
+
+      - name: ownership
+        node_kinds: [TEAM, SQUAD]
+        traversal: { edge_types: [OWNED_BY, BELONGS_TO], max_hops: 3, direction: up }
+        required: true
+        max_items: 5
+        token_share: 15
+
+  implementation:
+    slots:
+      - name: approved_requirement
+        node_kinds: [WORK_ITEM, DOCUMENT]
+        traversal: { edge_types: [SPECIFIED_BY, IMPLEMENTS], max_hops: 3, direction: any }
+        required: true
+        max_items: 5
+        token_share: 15
+
+      - name: accepted_design_references
+        node_kinds: [DOCUMENT]
+        traversal: { edge_types: [SPECIFIED_BY, RELATED_TO], max_hops: 3, direction: any }
+        required: true
+        max_items: 10
+        token_share: 15
+
+      - name: repository_path_mappings
+        node_kinds: [REPOSITORY, DIRECTORY]
+        capability: CODE
+        traversal: { edge_types: [HAS_SERVICE, CONTAINS], max_hops: 4, direction: any }
+        required: true
+        max_items: 15
+        token_share: 15
+
+      - name: current_pr_commit
+        description: The active PR/commit for this work item, when one exists.
+        node_kinds: [PULL_REQUEST, COMMIT]
+        capability: CHANGE_REVIEW
+        traversal: { edge_types: [CHANGES, IMPLEMENTS], max_hops: 3, direction: any }
+        required: false
+        max_items: 5
+        token_share: 15
+
+      - name: changed_relevant_files
+        node_kinds: [FILE]
+        capability: CODE
+        traversal: { edge_types: [CHANGES, CONTAINS], max_hops: 4, direction: any }
+        required: false
+        max_items: 30
+        token_share: 20
+
+      - name: applicable_tests_and_policies
+        node_kinds: [TEST_PLAN, POLICY_DOCUMENT]
+        traversal: { edge_types: [VERIFIES, RELATED_TO], max_hops: 3, direction: any }
+        required: true
+        max_items: 10
+        token_share: 20
+
+  testing:
+    slots:
+      - name: acceptance_criteria
+        node_kinds: [WORK_ITEM, DOCUMENT]
+        traversal: { edge_types: [SPECIFIED_BY], max_hops: 3, direction: any }
+        required: true
+        max_items: 5
+        token_share: 20
+
+      - name: changed_files_components
+        node_kinds: [FILE, SERVICE]
+        capability: CODE
+        traversal: { edge_types: [CHANGES, CONTAINS], max_hops: 4, direction: any }
+        required: true
+        max_items: 30
+        token_share: 20
+
+      - name: test_locations
+        node_kinds: [TEST_PLAN, DIRECTORY, FILE]
+        capability: QUALITY
+        traversal: { edge_types: [VERIFIES, CONTAINS], max_hops: 4, direction: any }
+        required: true
+        max_items: 15
+        token_share: 20
+
+      - name: related_defect_evidence
+        node_kinds: [BUG, WORK_ITEM]
+        traversal: { edge_types: [RELATED_TO, DEPENDS_ON], max_hops: 2, direction: any }
+        required: false
+        max_items: 10
+        token_share: 15
+
+      - name: applicable_quality_policies
+        node_kinds: [POLICY_DOCUMENT]
+        capability: POLICY
+        traversal: { edge_types: [RELATED_TO], max_hops: 3, direction: any }
+        required: true
+        max_items: 10
+        token_share: 25
+
+  review:
+    slots:
+      - name: requirement
+        node_kinds: [WORK_ITEM, DOCUMENT]
+        traversal: { edge_types: [SPECIFIED_BY, IMPLEMENTS], max_hops: 3, direction: any }
+        required: true
+        max_items: 5
+        token_share: 15
+
+      - name: accepted_design
+        node_kinds: [DOCUMENT]
+        traversal: { edge_types: [SPECIFIED_BY, RELATED_TO], max_hops: 3, direction: any }
+        required: true
+        max_items: 5
+        token_share: 15
+
+      - name: pr_and_commit
+        node_kinds: [PULL_REQUEST, COMMIT]
+        capability: CHANGE_REVIEW
+        traversal: { edge_types: [CHANGES, IMPLEMENTS], max_hops: 3, direction: any }
+        required: true
+        max_items: 5
+        token_share: 15
+
+      - name: changed_files
+        node_kinds: [FILE]
+        capability: CODE
+        traversal: { edge_types: [CHANGES], max_hops: 3, direction: any }
+        required: true
+        max_items: 30
+        token_share: 20
+
+      - name: test_build_evidence
+        node_kinds: [TEST_RESULT, BUILD, DEPLOYMENT]
+        capability: QUALITY
+        traversal: { edge_types: [VERIFIES, RELATED_TO], max_hops: 3, direction: any }
+        required: true
+        max_items: 15
+        token_share: 20
+
+      - name: policies_and_ownership
+        node_kinds: [POLICY_DOCUMENT, TEAM, SQUAD]
+        traversal: { edge_types: [RELATED_TO, OWNED_BY], max_hops: 3, direction: any }
+        required: true
+        max_items: 10
+        token_share: 15
+
+# Defaults applied when a slot omits the field. See retrieval/contracts.py.
+defaults:
+  max_items: 10
+  token_share: 10
+  max_age_days: 14
+  required: false

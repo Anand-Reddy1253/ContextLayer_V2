@@ -1,0 +1,8 @@
+[
+  { "native_id": "acme-org/identity-service", "acl_ref": { "org": "acme-org", "team": "identity-squad" } },
+  { "native_id": "acme-org/sso-gateway", "acl_ref": { "org": "acme-org", "team": "identity-squad" } },
+  { "native_id": "acme-org/identity-service@main:src/sso/callback.py", "acl_ref": { "org": "acme-org", "team": "identity-squad" } },
+  { "native_id": "acme-org/identity-service#7", "acl_ref": { "org": "acme-org", "team": "identity-squad" } },
+  { "native_id": "acme-org/identity-service@abc1234", "acl_ref": { "org": "acme-org", "team": "identity-squad" } },
+  { "native_id": "acme-org/identity-service/actions/555", "acl_ref": { "org": "acme-org", "team": "identity-squad" } }
+]
