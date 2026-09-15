@@ -90,31 +90,26 @@ LINK_PATTERNS: list[LinkPattern] = [
 # CONTAINS hierarchy. Below it, the PROPOSED/SYNC_EXTRACTED review-queue
 # path applies. 0.95 rather than 1.0 so a caller can mark something "as
 # good as structural" without needing an exact float match.
+#
+# Under the graduated per-location table (cross_references.py's
+# CONFIDENCE_BY_LOCATION) this cleanly separates title/commit_message
+# (1.00/0.98, auto-confirmed — an author's declared intent) from
+# branch/body (0.90/0.85, still real signal, still gets a human look — a
+# branch name or a passing mention is not the same as a stated claim) and
+# comment (0.70, weakest).
+#
+# There is deliberately no separate "resolution boost" added on top of
+# this anymore. An earlier version of this table was coarser (a flat 0.7
+# for anything text-mined) and needed one, since resolving to a real node
+# was the only signal available to tell a good guess from a bad one. Now
+# that confidence already reflects *where* the reference was found in
+# fine-enough detail, adding more on resolution would just double-count
+# the same evidence — and resolution is still required, just as a
+# precondition rather than an adjustment: an unresolved reference is
+# dropped before this value is ever read (see the `target is None` branch
+# below), so nothing at any confidence level ever becomes an edge without
+# first being checked against a real node.
 _AUTO_CONFIRM_THRESHOLD = 0.95
-
-# How much a reference resolving is worth, added to the extraction-time
-# prior. SourceLink.confidence is assigned before anything knows whether
-# the referenced object exists; "AB#99999" pointing at nothing is a guess,
-# while "AB#412" resolving to exactly one real work item is a reference
-# whose target demonstrably exists.
-#
-# Why this had to change at all: structured vendor fields are same-system
-# by definition and score 1.0, while a reference to *another* system can
-# only ever be text-mined and scored below the auto-confirm threshold. Since
-# graph/traversal.py walks ACTIVE edges only, every cross-tool edge was
-# invisible from creation, pending a human confirming each one. The policy
-# silently encoded "same-system = trusted, cross-system = guess" — backwards
-# for a context layer whose whole point is cross-tool traceability.
-#
-# A boost rather than a floor, deliberately. Resolution proves the target
-# exists; it does not prove the relationship is meaningful. A work item id
-# in a pull request *title* is the author declaring intent and clears the
-# bar once resolved; the same id in a comment ("unlike AB#412, this...")
-# resolves just as cleanly and still deserves a human look. Flooring every
-# resolved link to the threshold would auto-confirm both and leave the
-# review queue permanently empty — it would have been the same mistake in
-# the opposite direction.
-_RESOLUTION_BOOST = 0.10
 
 
 _EDGE_TYPE_BY_LINK_KIND: dict[str, EdgeType] = {
@@ -197,10 +192,10 @@ async def extract_links_for_node(
             stats.unresolved += 1
             continue
 
-        # The reference resolved to a real node — raise it above its
-        # extraction-time prior (see _RESOLUTION_BOOST). Capped at 1.0 so a
-        # vendor's own structured field stays exactly 1.0.
-        confidence = min(1.0, link.confidence + _RESOLUTION_BOOST)
+        # Resolving is a precondition (we're past the `target is None`
+        # check above), not a further adjustment — link.confidence is the
+        # final value, already graduated by where it was found.
+        confidence = link.confidence
         auto_confirmed = confidence >= _AUTO_CONFIRM_THRESHOLD
         # link.reverse means the vendor stated the relation from the far
         # end's point of view (see SourceLink.reverse) — the edge belongs

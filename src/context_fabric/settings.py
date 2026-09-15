@@ -53,3 +53,8 @@ class Settings(BaseSettings):
     CF_GITHUB_APP_ID: str | None = None
     CF_GITHUB_APP_PRIVATE_KEY_PATH: str | None = None
     CF_GITHUB_TOKEN: str | None = None
+
+    # --- Ollama (enrichment/ — local LLM abstracts, ADR-010) ---
+    CF_OLLAMA_BASE_URL: str = "http://localhost:11434"
+    CF_OLLAMA_MODEL: str = "llama3.2:1b"
+    CF_OLLAMA_EMBED_MODEL: str = "nomic-embed-text"

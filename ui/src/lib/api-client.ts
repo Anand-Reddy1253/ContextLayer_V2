@@ -294,7 +294,13 @@ export const api = {
     }),
   getNodeGraph: (nodeId: string) => request<CatalogGraph>(`/catalog/nodes/${nodeId}/graph`),
   getEnterpriseGraph: () => request<CatalogGraph>("/catalog/enterprise-graph"),
-  searchCards: (params: { q: string; business_node_id?: string; limit?: number }) => {
+  searchCards: (params: {
+    q: string;
+    business_node_id?: string;
+    source_system?: string;
+    limit?: number;
+    semantic?: boolean;
+  }) => {
     const qs = new URLSearchParams(
       Object.entries(params).filter(([, v]) => v !== undefined && v !== "") as [
         string,

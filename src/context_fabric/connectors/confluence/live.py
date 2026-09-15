@@ -312,7 +312,10 @@ class ConfluenceLiveConnector(LiveConnectorBase):
             return mapper.map_links_from_text(native_id, body)
         if native_id in self._comment_by_native_id:
             body = self._comment_by_native_id[native_id]["body"]
-            return mapper.map_links_from_text(native_id, body)
+            # Previously defaulted to location="page_body" (0.85) same as
+            # a page — a comment is a passing mention, not a declared
+            # spec, and belongs at the "comment" tier (0.70).
+            return mapper.map_links_from_text(native_id, body, location="comment")
         return []
 
     async def get_acl_reference(self, native_id: str) -> ACLReference:

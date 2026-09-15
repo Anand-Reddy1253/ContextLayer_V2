@@ -809,6 +809,11 @@ class AzureDevOpsLiveConnector(LiveConnectorBase):
             return mapper.map_links(self._work_items_raw_by_id[native_id])
         if native_id in self._build_by_native_id:
             return mapper.map_build_links(self._build_by_native_id[native_id])
+        # Previously missing entirely — a PR native_id fell straight
+        # through to `return []`, so no ADO pull request's title, branch
+        # name, or description was ever scanned for a cross-reference.
+        if native_id in self._pull_request_by_native_id:
+            return mapper.map_pull_request_links(self._pull_request_by_native_id[native_id])
         return []
 
     async def get_acl_reference(self, native_id: str) -> ACLReference:

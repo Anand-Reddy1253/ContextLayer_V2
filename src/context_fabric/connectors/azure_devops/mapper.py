@@ -241,6 +241,31 @@ def map_pull_request(raw: dict[str, Any]) -> SourceObject:
     )
 
 
+def map_pull_request_links(raw: dict[str, Any]) -> list[SourceLink]:
+    """Cross-references out of an ADO pull request's own title, branch
+    name, and description — previously not scanned at all (get_links only
+    handled work items and builds; a PR native_id fell straight through to
+    "return []"). A real gap: this org's own real data has ticket keys in
+    PR branch names ("feature/AB-44", "refs/heads/design/WI-616") at least
+    as often as in titles, and description is where a "Fixes AB#59" style
+    reference would sit for anyone following that convention."""
+    native_id = f"PR-{raw['pullRequestId']}"
+    return (
+        extract_cross_references(
+            native_id, raw.get("title") or "", location="title",
+            skip_ref=lambda ref: ref == native_id,
+        )
+        + extract_cross_references(
+            native_id, raw.get("sourceRefName") or "", location="branch",
+            skip_ref=lambda ref: ref == native_id,
+        )
+        + extract_cross_references(
+            native_id, raw.get("description") or "", location="description",
+            skip_ref=lambda ref: ref == native_id,
+        )
+    )
+
+
 def map_git_repository(raw: dict[str, Any]) -> SourceObject:
     """ADO's own Git repos — a separate object from work items, listed
     only as a lightweight container (no branch/tree/blob crawl) so Pull

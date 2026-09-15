@@ -24,10 +24,14 @@ from context_fabric.connectors.github.live import GitHubLiveConnector
 from context_fabric.connectors.jira.live import JiraLiveConnector
 from context_fabric.connectors.teams.live import TeamsLiveConnector
 from context_fabric.domain.errors import ConnectorError
+from context_fabric.enrichment.confluence_abstracts import enrich_confluence_pages
+from context_fabric.enrichment.node_embeddings import enrich_node_embeddings
+from context_fabric.enrichment.ollama_client import OllamaClient
 from context_fabric.persistence.repositories.connector_connection import (
     ConnectorConnectionRepository,
     ConnectorConnectionSummary,
 )
+from context_fabric.persistence.repositories.node import NodeRepository
 from context_fabric.persistence.repositories.sync_run import SyncRunRepository
 from context_fabric.persistence.repositories.sync_state import SyncStateRepository
 from context_fabric.settings import Settings
@@ -94,6 +98,16 @@ class SyncTriggerResponse(BaseModel):
     duration_seconds: float
     error_category: str | None = None
     error_detail: str | None = None
+
+
+class EnrichTriggerResponse(BaseModel):
+    nodes_scanned: int
+    abstracts_generated: int
+    embeddings_generated: int
+    skipped_unchanged: int
+    skipped_not_synced: int
+    errors: int
+    duration_seconds: float
 
 
 @router.get("", response_model=list[ConnectorConnectionSummary])
@@ -502,6 +516,96 @@ async def trigger_sync(
         error_detail=run.error_detail,
     )
 
+
+
+@router.post("/{connection_id}/enrich", response_model=EnrichTriggerResponse)
+async def trigger_enrichment(
+    connection_id: UUID,
+    force: bool = False,
+    session: AsyncSession = Depends(get_session),
+) -> Any:
+    """On-demand search-metadata generation — never run by sync itself
+    (ADR-003), never touching `get_context_pack`'s deterministic path.
+
+    Confluence gets LLM abstracts + keywords (ADR-010,
+    enrichment/confluence_abstracts.py) *and* embeddings, since it's the
+    one connector with no vendor-supplied description at all. Every other
+    connector (Azure DevOps, GitHub, Jira) gets embeddings only
+    (enrichment/node_embeddings.py) — they already carry real
+    names/descriptions, so the abstract-generation gap doesn't apply the
+    same way; only the semantic-search coverage does.
+
+    Requires Ollama running locally (CF_OLLAMA_BASE_URL/CF_OLLAMA_MODEL/
+    CF_OLLAMA_EMBED_MODEL)."""
+    conn_repo = ConnectorConnectionRepository(session)
+    connection = await conn_repo.get(connection_id)
+    if connection is None:
+        raise HTTPException(404, "connector connection not found")
+    if connection.source_system not in ("confluence", "azure_devops", "github", "jira"):
+        raise HTTPException(
+            400, f"enrichment is not implemented for {connection.source_system!r}"
+        )
+
+    credential = None
+    if connection.mode == "live":
+        ciphertext = await conn_repo.get_credential_ciphertext(connection_id)
+        settings = Settings()
+        if ciphertext is None or not settings.CF_SECRET_KEY:
+            raise HTTPException(400, "this connection has no usable stored credential")
+        credential = decrypt_credential(ciphertext, settings.CF_SECRET_KEY)
+
+    connector = _build_connector(
+        connection.source_system, connection.mode, connection.config, credential
+    )
+    settings = Settings()
+    ollama = OllamaClient(settings.CF_OLLAMA_BASE_URL, settings.CF_OLLAMA_MODEL)
+
+    started = time.monotonic()
+    try:
+        if connection.source_system == "confluence":
+            page_stats = await enrich_confluence_pages(
+                connector,
+                NodeRepository(session),
+                ollama,
+                source_instance_id=connection.instance_id,
+                embed_model=settings.CF_OLLAMA_EMBED_MODEL,
+                force=force,
+            )
+            response = EnrichTriggerResponse(
+                nodes_scanned=page_stats.pages_scanned,
+                abstracts_generated=page_stats.abstracts_generated,
+                embeddings_generated=page_stats.embeddings_generated,
+                skipped_unchanged=page_stats.skipped_unchanged,
+                skipped_not_synced=page_stats.skipped_not_synced,
+                errors=page_stats.errors,
+                duration_seconds=0.0,
+            )
+        else:
+            node_stats = await enrich_node_embeddings(
+                connector,
+                NodeRepository(session),
+                ollama,
+                source_instance_id=connection.instance_id,
+                embed_model=settings.CF_OLLAMA_EMBED_MODEL,
+                force=force,
+            )
+            response = EnrichTriggerResponse(
+                nodes_scanned=node_stats.nodes_scanned,
+                abstracts_generated=0,
+                embeddings_generated=node_stats.embeddings_generated,
+                skipped_unchanged=node_stats.skipped_unchanged,
+                skipped_not_synced=node_stats.skipped_not_synced,
+                errors=node_stats.errors,
+                duration_seconds=0.0,
+            )
+    except ConnectorError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    finally:
+        await ollama.aclose()
+        if hasattr(connector, "aclose"):
+            await connector.aclose()  # type: ignore[attr-defined]
+    response.duration_seconds = round(time.monotonic() - started, 2)
+    return response
 
 
 def _build_connector(

@@ -9,19 +9,22 @@ nothing here ever touches a sync-owned or extracted edge."""
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from difflib import SequenceMatcher
 from typing import Any
 from urllib.parse import urlsplit
 from uuid import UUID
 
+import structlog
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from context_fabric.api.deps import get_session
 from context_fabric.domain.edge import Edge
 from context_fabric.domain.enums import EdgeOrigin, EdgeState, EdgeType, Layer
 from context_fabric.domain.query import AggregateQuery, EntityQuery
+from context_fabric.enrichment.ollama_client import EnrichmentError, OllamaClient
 from context_fabric.persistence.orm.edge import EdgeORM
 from context_fabric.persistence.orm.node import NodeORM
 from context_fabric.persistence.repositories.context_space import ContextSpaceRepository
@@ -32,11 +35,52 @@ from context_fabric.retrieval.query_compiler import (
     compile_group,
     resolve_relations,
 )
+from context_fabric.retrieval.semantic import rank_by_similarity, reciprocal_rank_fusion
+from context_fabric.settings import Settings
 
 router = APIRouter(prefix="/api/catalog", tags=["catalog"])
+logger = structlog.get_logger()
 
 
-def _node_json(node: Any) -> dict[str, Any]:
+def _dedup_relationship_edges(edges: list[Any]) -> list[Any]:
+    """Multiple text locations (a PR's title *and* its branch both naming
+    the same target) legitimately produce more than one DB row for what
+    reads as the same relationship — edges are unique by
+    `(src_id, dst_id, type, origin)`, not `(src_id, dst_id, type)`. Found
+    live: the same `{src, type, dst}` triple appearing twice in one
+    `/entities/search` response (and the same risk exists in
+    `search_cards`'s link list). Collapses to one edge per
+    `(src, dst, type)`, keeping whichever instance has the highest
+    confidence — works on either `EdgeORM` rows (plain string `.type`) or
+    domain `Edge` objects (enum `.type`)."""
+    best: dict[tuple[Any, Any, str], Any] = {}
+    for e in edges:
+        type_val = e.type.value if hasattr(e.type, "value") else e.type
+        key = (e.src_id, e.dst_id, type_val)
+        current = best.get(key)
+        if current is None or (e.confidence or 0) > (current.confidence or 0):
+            best[key] = e
+    return list(best.values())
+
+
+def _node_json(node: Any, *, include_attributes: bool = True) -> dict[str, Any]:
+    """`include_attributes=False` (search_cards's ancestors/links — context
+    around a match, not the match itself) drops the full attribute bag
+    entirely, not just the embedding — found live: a card's ancestor
+    chain and cross-links were carrying every embedded node's full
+    `attributes`, unbounded, for data the UI never even reads off them
+    (`AncestorTrail`/`LinkRow` only use kind/name/source_system).
+
+    The raw `embedding` vector (a 700+-float array, ~10-15KB serialized)
+    is stripped unconditionally either way — it's internal search-ranking
+    data, never something a human or LLM reading this response has a use
+    for, on *any* node this function touches."""
+    if include_attributes:
+        attributes = node.attributes
+        if "embedding" in attributes:
+            attributes = {k: v for k, v in attributes.items() if k != "embedding"}
+    else:
+        attributes = {}
     return {
         "id": str(node.id),
         "layer": node.layer.value,
@@ -51,7 +95,7 @@ def _node_json(node: Any) -> dict[str, Any]:
         "path": node.path,
         "status": node.status.value,
         "deleted_at": node.deleted_at.isoformat() if node.deleted_at else None,
-        "attributes": node.attributes,
+        "attributes": attributes,
     }
 
 
@@ -143,7 +187,7 @@ def _native_call_json(node: Any) -> dict[str, Any] | None:
     return None
 
 
-def _locator_json(node: Any) -> dict[str, Any]:
+def _locator_json(node: Any, *, include_native_call: bool = True) -> dict[str, Any]:
     """Everything a caller needs to identify and fetch this exact object
     from its native source, independent of Context Fabric's own id
     (docs/UI.md "Search") — a downstream agent handing this off to a
@@ -151,7 +195,16 @@ def _locator_json(node: Any) -> dict[str, Any]:
     the source system, its native identity, and a fully-qualified deep
     link, not our internal UUID. `url` already encodes the org/site
     context (e.g. "https://acme.atlassian.net/browse/TALENT-2"), so no
-    separate connection-config lookup is needed here. `native_call`
+    separate connection-config lookup is needed here.
+
+    `include_native_call=False` (search_cards's ancestors) drops the
+    native-MCP-call payload — a breadcrumb in the containment chain isn't
+    something a caller fetches directly the way the actual match or a
+    cross-linked node is, and it's real per-node weight (found live:
+    controlling response size for `search-cards`, this was worth cutting
+    alongside the embedding-stripping fix on `_node_json`).
+
+    `native_call`
     additionally gives the literal tool + params a *native* MCP server
     call would need — found missing via research (docs/BENCHMARK.md):
     a human-readable URL alone isn't the input shape those tools
@@ -162,7 +215,7 @@ def _locator_json(node: Any) -> dict[str, Any]:
         "native_id": node.native_id,
         "kind": node.kind,
         "url": (node.attributes or {}).get("url"),
-        "native_call": _native_call_json(node),
+        "native_call": _native_call_json(node) if include_native_call else None,
     }
 
 
@@ -230,8 +283,10 @@ async def get_node_links(
     node = await node_repo.get(node_id)
     if node is None:
         raise HTTPException(404, "node not found")
-    edges = await EdgeRepository(session).list_touching(
-        node_id, exclude_types=[EdgeType.CONTAINS.value]
+    edges = _dedup_relationship_edges(
+        await EdgeRepository(session).list_touching(
+            node_id, exclude_types=[EdgeType.CONTAINS.value]
+        )
     )
     counterpart_ids = {e.dst_id if e.src_id == node_id else e.src_id for e in edges}
     counterparts = {n.id: n for n in await node_repo.get_many(list(counterpart_ids))}
@@ -674,24 +729,217 @@ def _business_context_for(
     return None
 
 
+# SequenceMatcher.ratio() threshold for the fuzzy/typo tier in
+# _score_match — 0.75 tolerates a one/two-character typo on a short word
+# ("vaccancy" vs "vacancy" = 0.94) without matching unrelated words.
+_FUZZY_WORD_THRESHOLD = 0.75
+
+# A query word naming a kind becomes a hard filter, not just more text to
+# match against. "issue"/"bug" both map onto GitHub's ISSUE (it has no
+# separate BUG kind — a bug there is just an issue, sometimes labeled) as
+# well as the BUG kind ADO/Jira actually have, so either word still finds
+# a GitHub bug report.
+_KIND_KEYWORDS: dict[str, frozenset[str]] = {
+    "bug": frozenset({"BUG", "ISSUE"}),
+    "bugs": frozenset({"BUG", "ISSUE"}),
+    "defect": frozenset({"BUG", "ISSUE"}),
+    "defects": frozenset({"BUG", "ISSUE"}),
+    "issue": frozenset({"ISSUE", "BUG"}),
+    "issues": frozenset({"ISSUE", "BUG"}),
+    "task": frozenset({"TASK"}),
+    "tasks": frozenset({"TASK"}),
+    "story": frozenset({"STORY"}),
+    "stories": frozenset({"STORY"}),
+    "epic": frozenset({"EPIC"}),
+    "epics": frozenset({"EPIC"}),
+    "feature": frozenset({"FEATURE"}),
+    "features": frozenset({"FEATURE"}),
+    "pr": frozenset({"PULL_REQUEST"}),
+    "prs": frozenset({"PULL_REQUEST"}),
+    "page": frozenset({"PAGE"}),
+    "pages": frozenset({"PAGE"}),
+}
+
+
+def _infer_kind_filter(q: str) -> tuple[set[str] | None, str]:
+    """Splits `q` into a hard kind filter plus the remaining free-text
+    query. Found live: "vacancy bug" with a Jira source filter returned
+    both a BUG (TF-1) and a TASK (TF-2), because "bug" was only ever
+    text-matched, never understood as naming a kind. The matched word(s)
+    are stripped from the text used for lexical/semantic scoring
+    afterward — a real bug's own title rarely contains the literal word
+    "bug" ("Create Vacancy - Max length validations..." is a BUG with no
+    such word anywhere in it), so forcing it to *also* text-match would
+    wrongly exclude exactly the results the filter exists to include."""
+    kinds: set[str] = set()
+    remaining: list[str] = []
+    for word in q.split():
+        matched = _KIND_KEYWORDS.get(word.lower())
+        if matched:
+            kinds |= matched
+        else:
+            remaining.append(word)
+    return (kinds or None, " ".join(remaining))
+
+
 def _score_match(q: str, node: Any) -> float | None:
-    """Keyword relevance over name/description — `None` means no match.
-    Deliberately isolated behind this one function: the plan is to swap
-    this for embeddings-based semantic matching over the same two short
-    fields later (title + description), without touching anything else
-    in /search-cards (docs/UI.md "Search")."""
+    """Keyword relevance over name/description/LLM-generated abstract —
+    `None` means no match. Deliberately isolated behind this one function:
+    the plan is to swap this for embeddings-based semantic matching over
+    the same short fields later, without touching anything else in
+    /search-cards (docs/UI.md "Search").
+
+    `attributes.llm_abstract`/`attributes.llm_keywords` (ADR-010,
+    enrichment/confluence_abstracts.py) are this function's hook for
+    LLM-generated search metadata: a keyword hit is a deliberate tag, so it
+    outranks a plain substring hit; an llm_abstract hit is only checked
+    when `description` didn't already match, so vendor-sourced text always
+    wins at equal match strength — llm_abstract is a fallback, never an
+    override.
+
+    `native_id` gets the same name/prefix/substring tiers as `name` — a
+    real gap found live: searching a vendor's own ticket key ("TF-1")
+    matched nothing, because only `name`/`description` were ever checked.
+    A key lookup is at least as strong a signal as a name match (it's
+    unambiguous), so the two are scored identically and the better of the
+    two wins."""
     ql = q.lower()
     name = (node.name or "").lower()
-    if name == ql:
-        return 1.0
-    if name.startswith(ql):
-        return 0.9
-    if ql in name:
-        return 0.7
+    native_id = (node.native_id or "").lower()
+
+    def _identity_tier(text: str) -> float | None:
+        if not text:
+            return None
+        if text == ql:
+            return 1.0
+        if text.startswith(ql):
+            return 0.9
+        if ql in text:
+            return 0.7
+        return None
+
+    name_score = _identity_tier(name)
+    id_score = _identity_tier(native_id)
+    if name_score is not None or id_score is not None:
+        return max(s for s in (name_score, id_score) if s is not None)
+
+    keywords = node.attributes.get("llm_keywords") or []
+    if any(ql in str(kw).lower() for kw in keywords):
+        return 0.55
     description = (node.description or "").lower()
     if description and ql in description:
         return 0.4
+    llm_abstract = (node.attributes.get("llm_abstract") or "").lower()
+    if llm_abstract and ql in llm_abstract:
+        return 0.35
+
+    # Multi-word queries ("vacancy bug") don't have to appear as one
+    # contiguous phrase — found live: "vacancy" alone matched 20 nodes,
+    # "vacancy bug" matched none, because every tier above only checks the
+    # whole query as a single substring. This is a coarse AND-of-terms
+    # fallback (every word present *somewhere* across the node's own
+    # text, any field, any order) — real tokenized ranking is ADR-010's
+    # still-unbuilt step 1, this is the smallest fix for the gap actually
+    # hit, not a replacement for it.
+    haystack = " ".join(
+        (name, native_id, description, llm_abstract, " ".join(str(k) for k in keywords))
+    )
+    terms = ql.split()
+    if len(terms) > 1 and all(term in haystack for term in terms):
+        return 0.3
+
+    # Spelling tolerance ("vaccancy edit form") — every query word has a
+    # close match *somewhere* in the node's own words, per-word rather
+    # than whole-string (a typo in one word of a long title still
+    # resolves against just that word, not the title as a whole, which
+    # is why this isn't one SequenceMatcher.ratio() call over the full
+    # haystack). Weaker evidence than a confirmed exact multi-term match,
+    # so it's the lowest tier.
+    haystack_words = haystack.split()
+    if haystack_words and all(
+        any(
+            term in word or SequenceMatcher(None, term, word).ratio() >= _FUZZY_WORD_THRESHOLD
+            for word in haystack_words
+        )
+        for term in terms
+    ):
+        return 0.25
     return None
+
+
+def _freshness_ranking(nodes: list[Any]) -> list[UUID]:
+    """Newest `attributes["updated_at"]` first — the *vendor's* own
+    last-modified time, not our sync clock (same `$updatedAt`/`$syncedAt`
+    distinction the query language already draws). ISO 8601 strings sort
+    correctly as plain strings; a node with no parseable timestamp sorts
+    last (empty string is the lexicographically smallest, so it ends up
+    last under `reverse=True`) — still a real match, just contributing no
+    freshness signal, not excluded."""
+    def _sort_key(n: Any) -> str:
+        return str(n.attributes.get("updated_at") or "")
+
+    return [n.id for n in sorted(nodes, key=_sort_key, reverse=True)]
+
+
+async def _semantic_ranking(
+    q: str,
+    node_repo: NodeRepository,
+    nodes_by_id: dict[UUID, Any],
+    session: AsyncSession,
+    *,
+    scope_ids: set[str] | None,
+    sources: list[str] | None = None,
+    kinds: set[str] | None = None,
+) -> list[UUID]:
+    """Cosine-similarity ranking against every node carrying
+    `attributes.embedding` — additive, per ADR-010: a node lexical search
+    excluded outright can still surface here, which is the entire reason
+    this exists (see search_cards's own docstring). Best-effort: any
+    Ollama failure (unreachable, malformed response) returns an empty
+    ranking rather than failing the request — this is a ranking
+    enhancement, not a required dependency. `search_cards` merges this
+    with the lexical and freshness rankings via `reciprocal_rank_fusion`
+    itself, rather than fusing internally here, so all three signals are
+    combined in exactly one place."""
+    settings = Settings()
+    ollama = OllamaClient(settings.CF_OLLAMA_BASE_URL, settings.CF_OLLAMA_EMBED_MODEL)
+    try:
+        # Matches the "search_document:" prefix used when embedding page
+        # content (enrichment/confluence_abstracts.py) — nomic-embed-text's
+        # asymmetric-retrieval convention; the two sides of a search
+        # need different prefixes for good ranking.
+        query_vec = await ollama.embed(f"search_query: {q}")
+    except EnrichmentError as exc:
+        logger.warning("search_cards.semantic_fallback_to_lexical", error=str(exc))
+        return []
+    finally:
+        await ollama.aclose()
+
+    stmt = select(NodeORM).where(
+        NodeORM.layer == Layer.TECHNICAL.value,
+        NodeORM.deleted_at.is_(None),
+        NodeORM.attributes.has_key("embedding"),
+    )
+    if sources:
+        stmt = stmt.where(NodeORM.source_system.in_(sources))
+    if kinds:
+        stmt = stmt.where(NodeORM.kind.in_(kinds))
+    rows = (await session.execute(stmt)).scalars().all()
+
+    candidates: list[tuple[UUID, list[float]]] = []
+    for row in rows:
+        if scope_ids is not None and str(row.id) not in scope_ids:
+            continue
+        node = nodes_by_id.get(row.id)
+        if node is None:
+            node = await node_repo.get(row.id)
+            assert node is not None
+            nodes_by_id[node.id] = node
+        vector = node.attributes.get("embedding")
+        if isinstance(vector, list) and vector:
+            candidates.append((node.id, vector))
+
+    return rank_by_similarity(query_vec, candidates)
 
 
 @router.get("/search-cards")
@@ -699,7 +947,14 @@ async def search_cards(
     q: str,
     business_node_id: UUID | None = None,
     exclude_capabilities: str | None = None,
-    limit: int = 20,
+    source_system: str | None = None,
+    # 10, not the earlier 20 — found live: even with the similarity floor
+    # and lean node shapes, a full card (ancestors + links + business
+    # context) still runs a few KB each, and this is a discovery surface
+    # a human or LLM reads, not a bulk export. `limit` remains a caller
+    # override for whoever genuinely wants more.
+    limit: int = 10,
+    semantic: bool = False,
     session: AsyncSession = Depends(get_session),
 ) -> list[dict[str, Any]]:
     """Topic search over TECHNICAL nodes, returning "cards": the matched
@@ -724,9 +979,23 @@ async def search_cards(
     Enterprise Graph page's scope filter, just run server-side so it
     actually excludes rows rather than only highlighting them.
 
-    Ranking is keyword/name+description matching for now
-    (`_score_match`) — a placeholder for embeddings-based semantic search
-    over the same short fields, planned as a later upgrade.
+    `source_system`, when given (comma-separated for more than one, e.g.
+    "github,jira"), restricts results to those vendors — applied to both
+    the lexical SQL query and the semantic candidate set, so it composes
+    with `semantic=true` rather than only filtering one ranking.
+
+    Ranking is keyword/name+description matching by default (`_score_match`).
+    `semantic=true` additionally embeds `q` (local Ollama,
+    `CF_OLLAMA_EMBED_MODEL`) and cosine-ranks it against every node carrying
+    an `attributes.embedding` (today: enriched Confluence pages,
+    `enrichment/confluence_abstracts.py`), merging with the lexical ranking
+    via reciprocal rank fusion (`retrieval/semantic.py`) — additive, per
+    ADR-010, never a replacement: `semantic=false` (the default) reproduces
+    exactly today's ranking, and a node the lexical SQL prefilter excluded
+    entirely can still surface through the semantic ranking alone, which is
+    the whole point (an implicit relationship no keyword ever names).
+    Best-effort: if Ollama is unreachable, falls back to lexical-only
+    rather than failing the request.
 
     Each card also carries `business_context`, when the matched node is
     reachable from exactly one business node's own context space bindings
@@ -760,28 +1029,97 @@ async def search_cards(
             else None,
         )
 
+    kind_filter, q_text = _infer_kind_filter(q)
+
+    fields = (
+        NodeORM.name,
+        NodeORM.description,
+        NodeORM.native_id,
+        NodeORM.attributes["llm_abstract"].astext,
+        NodeORM.attributes["llm_keywords"].astext,
+    )
+    whole_phrase_match = or_(*(f.ilike(f"%{q_text}%") for f in fields))
+    # Every word present somewhere (any field, any order) — otherwise
+    # "vacancy bug" never reaches _score_match at all, since none of these
+    # rows contain that literal contiguous phrase (found live: "vacancy"
+    # alone matched 20 nodes, "vacancy bug" matched none). Matches
+    # _score_match's own multi-term fallback tier below.
+    terms = q_text.lower().split()
+
+    def _term_match(term: str):
+        # pg_trgm's "%" similarity operator — index-accelerated by the
+        # same ix_node_name_trgm GIN index migration 0014 already built —
+        # catches a misspelled term ("vaccancy") an exact ILIKE never
+        # would. Only on name/native_id: those are short, single-concept
+        # fields where trigram similarity is meaningful; description/
+        # abstract text is long enough that whole-field similarity
+        # against one word is noise, not signal.
+        return or_(
+            *(f.ilike(f"%{term}%") for f in fields),
+            NodeORM.name.op("%")(term),
+            NodeORM.native_id.op("%")(term),
+        )
+
+    multi_term_match = and_(*(_term_match(t) for t in terms)) if len(terms) > 1 else None
+    fuzzy_match = _term_match(q_text) if len(terms) == 1 else None
+
+    filters = [f for f in (whole_phrase_match, multi_term_match, fuzzy_match) if f is not None]
+    sources = [s.strip() for s in source_system.split(",")] if source_system else None
+
     stmt = select(NodeORM).where(
         NodeORM.layer == Layer.TECHNICAL.value,
         NodeORM.deleted_at.is_(None),
-        (NodeORM.name.ilike(f"%{q}%")) | (NodeORM.description.ilike(f"%{q}%")),
+        or_(*filters),
     )
+    if sources:
+        stmt = stmt.where(NodeORM.source_system.in_(sources))
+    if kind_filter:
+        stmt = stmt.where(NodeORM.kind.in_(kind_filter))
     rows = (await session.execute(stmt)).scalars().all()
 
     scored: list[tuple[float, Any]] = []
+    nodes_by_id: dict[UUID, Any] = {}
     for row in rows:
         if scope_ids is not None and str(row.id) not in scope_ids:
             continue
         node = await node_repo.get(row.id)
         assert node is not None
-        score = _score_match(q, node)
+        nodes_by_id[node.id] = node
+        score = _score_match(q_text, node)
         if score is not None:
             scored.append((score, node))
     scored.sort(key=lambda pair: pair[0], reverse=True)
+    lexical_ranking = [node.id for _score, node in scored]
+    freshness_ranking = _freshness_ranking([node for _score, node in scored])
+
+    # Always blend freshness in — not just under semantic=true. "Most
+    # relevant" alone let name-only lexical ties fall back to incidental
+    # row order; freshness as a standing second signal means, among
+    # equally-relevant results, the more recently updated one leads.
+    rankings = [lexical_ranking, freshness_ranking]
+    if semantic:
+        rankings.append(
+            await _semantic_ranking(
+                q_text,
+                node_repo,
+                nodes_by_id,
+                session,
+                scope_ids=scope_ids,
+                sources=sources,
+                kinds=kind_filter,
+            )
+        )
+    score_by_id = reciprocal_rank_fusion(rankings)
+    ranked_ids = sorted(score_by_id, key=lambda nid: score_by_id[nid], reverse=True)
+
+    ordered_nodes = [nodes_by_id[node_id] for node_id in ranked_ids]
 
     cards: list[dict[str, Any]] = []
-    for score, node in scored[: max(0, min(limit, 100))]:
+    for node in ordered_nodes[: max(0, min(limit, 100))]:
         ancestors = await node_repo.list_ancestors_of_path(node.path)
-        edges = await edge_repo.list_touching(node.id, exclude_types=[EdgeType.CONTAINS.value])
+        edges = _dedup_relationship_edges(
+            await edge_repo.list_touching(node.id, exclude_types=[EdgeType.CONTAINS.value])
+        )
         counterpart_ids = {e.dst_id if e.src_id == node.id else e.src_id for e in edges}
         counterparts = {n.id: n for n in await node_repo.get_many(list(counterpart_ids))}
 
@@ -795,7 +1133,7 @@ async def search_cards(
                 {
                     "edge": _edge_json(e),
                     "direction": "outgoing" if e.src_id == node.id else "incoming",
-                    "node": _node_json(other),
+                    "node": _node_json(other, include_attributes=False),
                     "locator": _locator_json(other),
                 }
             )
@@ -804,9 +1142,12 @@ async def search_cards(
             {
                 "node": _node_json(node),
                 "locator": _locator_json(node),
-                "score": score,
+                "score": score_by_id.get(node.id, 0.0),
                 "ancestors": [
-                    {"node": _node_json(a), "locator": _locator_json(a)}
+                    {
+                        "node": _node_json(a, include_attributes=False),
+                        "locator": _locator_json(a, include_native_call=False),
+                    }
                     for a in ancestors
                     if a.id != node.id
                 ],
@@ -1036,7 +1377,12 @@ async def search_entities(
     stmt = (
         select(NodeORM)
         .where(NodeORM.deleted_at.is_(None), predicate)
-        .order_by(NodeORM.name)
+        # Freshness (vendor $updatedAt), not name — name was never a
+        # meaningful ranking signal, just an arbitrary stable order.
+        # ISO 8601 strings sort correctly as plain text; nulls_last so a
+        # node with no timestamp doesn't win by sorting NULL-first, SQL's
+        # default for DESC.
+        .order_by(NodeORM.attributes["updated_at"].astext.desc().nulls_last())
         .limit(request.limit)
     )
     anchors = list((await session.execute(stmt)).scalars().all())
@@ -1068,7 +1414,9 @@ async def search_entities(
             EdgeORM.type != EdgeType.CONTAINS.value,
             EdgeORM.src_id.in_(anchor_ids) | EdgeORM.dst_id.in_(anchor_ids),
         )
-        edge_rows = list((await session.execute(edge_stmt)).scalars().all())
+        edge_rows = _dedup_relationship_edges(
+            list((await session.execute(edge_stmt)).scalars().all())
+        )
         counterpart_ids = {
             e.dst_id if e.src_id in set(anchor_ids) else e.src_id for e in edge_rows
         } - set(anchor_ids)

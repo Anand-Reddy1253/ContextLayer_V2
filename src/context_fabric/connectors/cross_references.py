@@ -202,16 +202,34 @@ LINK_KIND_BY_LOCATION: dict[str, LinkKind] = {
     "text": "mentions",
 }
 
-# Confidence prior by where the reference was found, before resolution.
-# link_extraction.py raises this once the reference actually resolves to
-# a real node — an explicit id that resolves is evidence, not a guess.
+# Confidence by where the reference was found — a graduated scale by how
+# deliberately a person put it there, not a flat "text-mined = 0.7" for
+# everything. Matches a known-good real-world weighting scheme rather than
+# guessed round numbers, and is used directly as the edge's final
+# confidence: an unresolved reference is never turned into an edge at all
+# (link_extraction.py drops it before this value is ever read), so there is
+# no separate "did it resolve" boost layered on top the way there used to
+# be — resolution is a precondition, not an adjustment.
+#
+#   Jira key in PR title            1.00   ->  "title"
+#   Jira key in commit message      0.98   ->  "commit_message"
+#   Jira key in branch name         0.90   ->  "branch"
+#   Jira key in PR body             0.85   ->  "body" / "description" / "page_body"
+#   Jira key in a review comment    0.70   ->  "comment" / "text"
+#
+# One location vocabulary, not five vendor-specific copies — "title" means
+# a GitHub PR/Issue title, an Azure Boards work item title, or an Azure
+# DevOps PR title identically; whichever vendor's connector calls
+# extract_cross_references with location="title" gets the same number. New
+# vendors plug into this table by naming which of these five buckets each
+# of their own fields falls into, not by inventing a new one.
 CONFIDENCE_BY_LOCATION: dict[str, float] = {
-    "title": 0.90,
-    "commit_message": 0.88,
-    "branch": 0.85,
-    "page_body": 0.80,
-    "description": 0.80,
-    "body": 0.75,
+    "title": 1.00,
+    "commit_message": 0.98,
+    "branch": 0.90,
+    "body": 0.85,
+    "description": 0.85,
+    "page_body": 0.85,
     "comment": 0.70,
     "text": 0.70,
 }

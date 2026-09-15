@@ -63,6 +63,18 @@ _ISSUE_FIELDS = (
 )
 
 
+def _browse_url(raw_self: str, key: str) -> str:
+    """Jira's own `self` field encodes the internal numeric id
+    (".../rest/api/3/issue/10000"), not the human-readable key — but
+    `/browse/` only accepts the key ("TF-1"), never the id. Confirmed
+    live: naively rewriting the path prefix on `self` produced
+    "https://.../browse/10000", a broken link a browser can't resolve.
+    Split on "/rest/api/3" to recover just the site origin, then build
+    the real browse URL from the key every raw payload already carries."""
+    origin = raw_self.split("/rest/api/3")[0]
+    return f"{origin}/browse/{key}"
+
+
 def _normalize_site_url(site_url: str) -> str:
     """Same fix as confluence/live.py's _normalize_site_url — strips
     anything beyond the bare site origin so a URL copied while inside a
@@ -154,7 +166,7 @@ class JiraLiveConnector(LiveConnectorBase):
                 "key": p["key"],
                 "name": p.get("name", p["key"]),
                 "description": p.get("description", ""),
-                "url": (p.get("self", "") or "").replace("/rest/api/3/project/", "/browse/"),
+                "url": _browse_url(p.get("self", "") or "", p["key"]),
             }
             for p in raw
         ]
@@ -189,22 +201,39 @@ class JiraLiveConnector(LiveConnectorBase):
             "status": (fields.get("status") or {}).get("name", ""),
             "assignee": assignee.get("displayName"),
             "description_text": mapper.adf_to_text(fields.get("description") or {}),
-            "url": raw.get("self", "").replace("/rest/api/3/issue/", "/browse/"),
+            "url": _browse_url(raw.get("self", ""), raw["key"]),
             "updated": fields.get("updated", ""),
             "issuelinks": issuelinks,
             "labels": fields.get("labels", []) or [],
         }
 
+    async def _search_issues(self, project_key: str) -> list[dict[str, Any]]:
+        """Jira's classic `GET /search` (startAt/total pagination,
+        `_paginated`'s usual shape) was retired — confirmed live, `410
+        Gone` — in favor of `POST /search/jql`, which pages via an opaque
+        `nextPageToken` instead of a numeric offset, so it can't reuse
+        `_paginated` as-is."""
+        results: list[dict[str, Any]] = []
+        next_page_token: str | None = None
+        while True:
+            body: dict[str, Any] = {
+                "jql": f"project={project_key} ORDER BY created ASC",
+                "fields": _ISSUE_FIELDS.split(","),
+                "maxResults": _PAGE_SIZE,
+            }
+            if next_page_token is not None:
+                body["nextPageToken"] = next_page_token
+            data = await self._request("POST", "/search/jql", json=body)
+            items = data.get("issues", [])
+            results.extend(items)
+            next_page_token = data.get("nextPageToken")
+            if not items or not next_page_token:
+                break
+        return results
+
     async def _ensure_issues_for_project(self, project_key: str) -> list[dict[str, Any]]:
         if project_key not in self._issues_by_project:
-            raw_issues = await self._paginated(
-                "/search",
-                items_key="issues",
-                params={
-                    "jql": f"project={project_key} ORDER BY created ASC",
-                    "fields": _ISSUE_FIELDS,
-                },
-            )
+            raw_issues = await self._search_issues(project_key)
             issues = [self._flatten_issue(i) for i in raw_issues]
             self._issues_by_project[project_key] = issues
             for i in issues:
@@ -223,7 +252,10 @@ class JiraLiveConnector(LiveConnectorBase):
                     "issue_key": issue_key,
                     "body_text": mapper.adf_to_text(c.get("body") or {}),
                     "author": (c.get("author") or {}).get("displayName", ""),
-                    "url": c.get("self", "").replace("/rest/api/3", "/browse"),
+                    "url": (
+                        f"{_browse_url(c.get('self', ''), issue_key)}"
+                        f"?focusedCommentId={c['id']}"
+                    ),
                 }
                 comments.append(comment)
                 self._comment_by_native_id[f"COMMENT-{comment['id']}"] = comment

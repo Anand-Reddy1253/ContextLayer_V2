@@ -10,6 +10,7 @@ from uuid import uuid4
 
 from context_fabric.api.routes.catalog import (
     _business_context_for,
+    _infer_kind_filter,
     _locator_json,
     _native_call_json,
     _reachable_ids,
@@ -19,7 +20,13 @@ from context_fabric.domain.enums import Layer
 from context_fabric.domain.node import Node
 
 
-def _node(name: str, description: str | None = None) -> Node:
+def _node(
+    name: str,
+    description: str | None = None,
+    *,
+    attributes: dict | None = None,
+    native_id: str = "312",
+) -> Node:
     now = datetime.now(UTC)
     return Node(
         layer=Layer.TECHNICAL,
@@ -28,9 +35,12 @@ def _node(name: str, description: str | None = None) -> Node:
         description=description,
         source_system="azure_devops",
         source_instance_id="ado-acme",
-        native_id="312",
+        native_id=native_id,
         path="ado_acme.312",
-        attributes={"url": "https://dev.azure.com/acme/_workitems/edit/312"},
+        attributes={
+            "url": "https://dev.azure.com/acme/_workitems/edit/312",
+            **(attributes or {}),
+        },
         first_seen_at=now,
         last_seen_at=now,
         created_at=now,
@@ -81,6 +91,103 @@ def test_score_match_description_only_scores_lowest():
 def test_score_match_no_match_returns_none():
     node = _node("Payments reconciliation", description="Nothing about auth here.")
     assert _score_match("sso", node) is None
+
+
+def test_score_match_exact_native_id_scores_highest():
+    node = _node("Vacancy edit form silently truncates descriptions", native_id="TF-1")
+    assert _score_match("tf-1", node) == 1.0
+
+
+def test_score_match_native_id_prefix_scores_below_exact():
+    node = _node("Some ticket", native_id="TF-142")
+    assert _score_match("tf-1", node) == 0.9
+
+
+def test_score_match_native_id_substring_scores_below_prefix():
+    node = _node("Some ticket", native_id="AB#296")
+    assert _score_match("296", node) == 0.7
+
+
+def test_score_match_uses_whichever_of_name_or_native_id_scores_higher():
+    # native_id is an exact match (1.0), name only a substring (0.7) —
+    # the id lookup wins.
+    node = _node("Implement SSO for gateway", native_id="SSO")
+    assert _score_match("sso", node) == 1.0
+
+
+def test_score_match_single_word_typo_matches_via_fuzzy_tier():
+    node = _node("Edit Vacancy form")
+    assert _score_match("vaccancy", node) == 0.25
+
+
+def test_score_match_multi_word_query_with_one_typo_matches_via_fuzzy_tier():
+    node = _node("Edit Vacancy form", description="Users report a problem on save.")
+    assert _score_match("vaccancy problm", node) == 0.25
+
+
+def test_score_match_unrelated_typo_query_does_not_fuzzy_match():
+    node = _node("Payments reconciliation")
+    assert _score_match("vaccancy", node) is None
+
+
+def test_score_match_multi_word_query_matches_across_fields_any_order():
+    node = _node("Edit Vacancy form", description="Users report a bug on save.")
+    assert _score_match("vacancy bug", node) == 0.3
+
+
+def test_score_match_multi_word_query_all_terms_must_be_present():
+    node = _node("Edit Vacancy form", description="Nothing about the other word here.")
+    assert _score_match("vacancy bug", node) is None
+
+
+def test_score_match_single_word_query_unaffected_by_multi_term_fallback():
+    # A single-word query that doesn't match anything still returns None —
+    # the multi-term fallback only applies when there's more than one term.
+    node = _node("Payments reconciliation")
+    assert _score_match("nonexistent", node) is None
+
+
+def test_infer_kind_filter_strips_the_kind_word_from_the_query():
+    kinds, remaining = _infer_kind_filter("vacancy bug")
+    assert kinds == {"BUG", "ISSUE"}
+    assert remaining == "vacancy"
+
+
+def test_infer_kind_filter_no_kind_word_returns_none_and_original_query():
+    kinds, remaining = _infer_kind_filter("vacancy edit form")
+    assert kinds is None
+    assert remaining == "vacancy edit form"
+
+
+def test_infer_kind_filter_unions_multiple_kind_words():
+    kinds, remaining = _infer_kind_filter("task or story about vacancy")
+    assert kinds == {"TASK", "STORY"}
+    assert remaining == "or about vacancy"
+
+
+def test_infer_kind_filter_is_case_insensitive():
+    kinds, remaining = _infer_kind_filter("Vacancy Bug")
+    assert kinds == {"BUG", "ISSUE"}
+    assert remaining == "Vacancy"
+
+
+def test_score_match_llm_keyword_hit_scores_between_name_substring_and_description():
+    node = _node("Login flow", attributes={"llm_keywords": ["sso", "oauth"]})
+    assert _score_match("sso", node) == 0.55
+
+
+def test_score_match_llm_abstract_hit_scores_lowest_when_no_vendor_description():
+    node = _node("Login flow", attributes={"llm_abstract": "Explains the SSO rollout plan."})
+    assert _score_match("sso", node) == 0.35
+
+
+def test_score_match_vendor_description_outranks_llm_abstract_at_equal_match():
+    node = _node(
+        "Login flow",
+        description="Covers SSO rollout details.",
+        attributes={"llm_abstract": "Also mentions SSO somewhere."},
+    )
+    assert _score_match("sso", node) == 0.4
 
 
 def test_locator_json_pulls_identity_and_url_from_attributes():

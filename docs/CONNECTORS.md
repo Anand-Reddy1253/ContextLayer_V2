@@ -111,6 +111,43 @@ Each container and object gets a unique `native_id` and, where the source
 provides one, a description — both preserved in the mapped `Node`
 (`attributes`/`description` fields, `docs/DOMAIN_MODEL.md`).
 
+## LLM-generated search metadata (Confluence)
+
+Confluence `PAGE` nodes carry no vendor-supplied `description` (the v2 API
+has none for pages, only spaces). `ADR-010-lexical-and-semantic-search.md`'s
+"selective LLM-generated abstracts" close that gap for the search/discovery
+surface only — never `get_context_pack`. `enrichment/confluence_abstracts.py`
+writes three bounded, regenerable attributes onto an already-synced page:
+`attributes.llm_abstract` (≤500 chars), `attributes.llm_keywords` (≤8 short
+tags), and `attributes.description_origin: "llm"` — vendor-sourced
+`description` always takes precedence when one exists.
+
+Generation is **on-demand only**, via `POST /api/connectors/{id}/enrich`
+(`api/routes/connectors.py`) — never run by sync itself (ADR-003) and never
+automatic. It calls a local Ollama model (`CF_OLLAMA_BASE_URL`/
+`CF_OLLAMA_MODEL`, default `llama3.2:1b` — see `.env.example`); regeneration
+is gated on `content_hash` (a page's raw payload already includes its body,
+so an edit changes the hash) unless `?force=true` is passed. `_score_match`
+(`api/routes/catalog.py`, `/search-cards`) checks `llm_keywords` and
+`llm_abstract` as fallback tiers below name/vendor-description matches.
+
+The same enrichment pass also writes `attributes.embedding` — a dense vector
+from a local embedding model (`CF_OLLAMA_EMBED_MODEL`, default
+`nomic-embed-text`), gated on its own `embedding_source_hash` independently
+of the abstract's hash (so a page enriched before embeddings existed gets
+one backfilled without regenerating an already-correct abstract, and a
+failure in either doesn't lose a successful result from the other). It's
+consumed only via the opt-in `semantic=true` param on `/search-cards`
+(default `false` — zero change to existing behavior otherwise):
+`retrieval/semantic.py` cosine-ranks the query's own embedding against every
+node carrying one, and merges that ranking with the lexical one via
+reciprocal rank fusion, so a node the lexical SQL prefilter excluded
+outright can still surface — this is the actual point of doing it at all,
+per ADR-010's amendment on why pgvector isn't used (no server-side
+extension needed for this small a candidate set; embeddings live as a plain
+JSONB float array on `node.attributes` and similarity is computed in
+Python, not in SQL).
+
 ## Anti-leakage test
 
 `tests/acceptance/` includes a test that walks every public method on every

@@ -76,3 +76,19 @@ as everything else ADR-003 already governs.
   data) and by running generation offline rather than in the request path.
 - If search quality plateaus without pgvector, it is never built — (3) is
   gated on evidence, not committed to now.
+
+## Amendment: (3) built without pgvector
+
+`pgvector` is not available on this deployment's Postgres install (`vector`
+returns zero rows from `pg_available_extensions`), and unlike Ollama there's
+no simple installer for it on Windows. Rather than block step (3) on that,
+embeddings (Confluence pages only, via `nomic-embed-text` — same local
+Ollama runtime as the abstracts in (2)) are stored as a plain JSONB float
+array on `node.attributes.embedding`, and similarity is computed in Python
+(`retrieval/semantic.py`'s `cosine_similarity`/`reciprocal_rank_fusion`)
+rather than in SQL. Fine at the current scale (a few dozen embedded nodes);
+an O(n) Python scan stops being fine well before pgvector would need
+installing anyway, and nothing about the `/search-cards?semantic=true`
+contract would need to change if it's swapped in later — only this one
+module. Still additive/opt-in, still hybrid RRF, still never touching
+`get_context_pack` — the "how" changed, not the "what" or "why."

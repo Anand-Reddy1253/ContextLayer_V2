@@ -246,17 +246,29 @@ function SearchCardView({ card }: { card: SearchCard }) {
   );
 }
 
+const SOURCE_SYSTEMS = ["azure_devops", "github", "confluence", "jira"] as const;
+
 export function SearchPage() {
   const [q, setQ] = useState("");
   const [submittedQ, setSubmittedQ] = useState("");
   const [businessNodeId, setBusinessNodeId] = useState("");
+  const [sourceSystems, setSourceSystems] = useState<Set<string>>(new Set());
+  const [semantic, setSemantic] = useState(false);
   const [view, setView] = useState<"cards" | "graph">("cards");
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
 
+  const sourceSystemParam = Array.from(sourceSystems).join(",");
+
   const orgTreeQuery = useQuery({ queryKey: ["org-tree"], queryFn: api.getOrgTree });
   const searchQuery = useQuery({
-    queryKey: ["search-cards", submittedQ, businessNodeId],
-    queryFn: () => api.searchCards({ q: submittedQ, business_node_id: businessNodeId || undefined }),
+    queryKey: ["search-cards", submittedQ, businessNodeId, sourceSystemParam, semantic],
+    queryFn: () =>
+      api.searchCards({
+        q: submittedQ,
+        business_node_id: businessNodeId || undefined,
+        source_system: sourceSystemParam || undefined,
+        semantic: semantic || undefined,
+      }),
     enabled: submittedQ.length > 0,
   });
 
@@ -320,6 +332,40 @@ export function SearchPage() {
           Search
         </button>
       </form>
+
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+        <label className="flex items-center gap-1.5 text-xs text-neutral-600">
+          <input
+            type="checkbox"
+            checked={semantic}
+            onChange={(e) => setSemantic(e.target.checked)}
+          />
+          Semantic search
+          <span className="text-neutral-400">
+            (meaning-based, not just keyword — catches typos/paraphrasing, local model)
+          </span>
+        </label>
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-neutral-600">
+          <span className="text-neutral-400">Sources:</span>
+          {SOURCE_SYSTEMS.map((src) => (
+            <label key={src} className="flex items-center gap-1">
+              <input
+                type="checkbox"
+                checked={sourceSystems.has(src)}
+                onChange={(e) =>
+                  setSourceSystems((prev) => {
+                    const next = new Set(prev);
+                    if (e.target.checked) next.add(src);
+                    else next.delete(src);
+                    return next;
+                  })
+                }
+              />
+              {src}
+            </label>
+          ))}
+        </div>
+      </div>
 
       {businessNodeId && (
         <div className="text-xs text-neutral-500">

@@ -774,10 +774,22 @@ class GitHubLiveConnector(LiveConnectorBase):
             )
         if native_id in self._pull_request_by_native_id:
             pr = self._pull_request_by_native_id[native_id]
-            return mapper.map_links_from_text(
-                native_id, pr.get("title") or "", repo_full_name=pr["repo"], location="title"
-            ) + mapper.map_links_from_text(
-                native_id, pr.get("body") or "", repo_full_name=pr["repo"], location="body"
+            # Branch name was never scanned before this — a real gap found
+            # against this project's own data: 14 of 25 real PR branches
+            # carry a ticket key (e.g. "feature/AB-44", "design/WI-616"),
+            # a convention at least as common here as putting the key in
+            # the title.
+            return (
+                mapper.map_links_from_text(
+                    native_id, pr.get("title") or "", repo_full_name=pr["repo"], location="title"
+                )
+                + mapper.map_links_from_text(
+                    native_id, pr.get("head_ref") or "", repo_full_name=pr["repo"],
+                    location="branch",
+                )
+                + mapper.map_links_from_text(
+                    native_id, pr.get("body") or "", repo_full_name=pr["repo"], location="body"
+                )
             )
         return []
 
