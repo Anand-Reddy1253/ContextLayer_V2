@@ -25,9 +25,31 @@ there is exactly one authorization code path regardless of transport.
 
 ## Tools
 
-All four are read-oriented. None writes to a vendor source
-(`AGENTS.md` §4/§6) or to the graph beyond `task_checkpoint` bookkeeping
-implied by orchestration.
+All are read-oriented. None writes to a vendor source (`AGENTS.md` §4/§6) or to
+the graph beyond `task_checkpoint` bookkeeping implied by orchestration.
+
+### Built today — the query tools
+
+Implemented in `mcp/tools.py` (transport-agnostic, registered by
+`server_stdio.py`; an HTTP transport would register the same functions):
+
+| Tool | Purpose |
+|---|---|
+| `describe_schema(kind?)` | Queryable kinds, their attribute keys, relation types. **Call first** — `node.kind` is a free string, so the vocabulary only exists as whatever has been synced. |
+| `search_entities(query, limit)` | The rule grammar (`domain/query.py`); returns the shared-node-dictionary shape documented in `docs/API.md`. |
+| `aggregate_entities(query, group_by)` | Live GROUP BY. One call instead of fetching rows to count them. |
+| `search_context(q, ...)` | The original keyword search, kept for compatibility. |
+
+`.claude/skills/context-fabric-query/SKILL.md` teaches an agent to use these —
+discover schema, build a query, read the response — and states the known gaps
+so it says "we don't track that" rather than inventing an answer.
+
+### Designed but not built
+
+The four tools below are the original design. They depend on scope inference
+from a `task_ref`, an evidence cache with token-budget enforcement, and
+`configs/stage-contracts.yaml` — none of which is wired. They are documented
+here as intent, not as available surface.
 
 ### `resolve_scope`
 

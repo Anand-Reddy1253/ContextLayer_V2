@@ -24,6 +24,7 @@ from context_fabric.domain.errors import NotFound
 from context_fabric.persistence.repositories.edge import EdgeRepository
 from context_fabric.persistence.repositories.node import NodeRepository
 from context_fabric.synchronization import sync_source
+from context_fabric.synchronization.orchestrator import SyncStats, _sweep_stale
 
 _PAGE_SIZE = 2
 
@@ -125,6 +126,41 @@ async def test_tombstone_soft_deletes_not_hard_deletes(db_session):
     # already-deleted node — idempotency applies to the sweep too.
     second_run = await sync_source(db_session, connector_after, source_instance_id="fake-instance")
     assert second_run.nodes_tombstoned == 0
+
+
+async def test_sweep_stale_refuses_to_run_against_a_partial_walk(db_session):
+    """The guard this exists for: an incremental ("changed since X") sync
+    pass would only populate a subset of `expanded`. If `_sweep_stale` ever
+    ran against that partial set, every node the delta didn't happen to
+    touch would look deleted, and every edge touching it would cascade
+    away. This proves the sweep is a no-op unless `walk_complete` was
+    genuinely reached — not just that today's callers happen to behave."""
+    connector = _FakeConnector()
+    await sync_source(db_session, connector, source_instance_id="fake-instance")
+
+    node_repo = NodeRepository(db_session)
+    edge_repo = EdgeRepository(db_session)
+    child = await node_repo.get_by_technical_identity(
+        "fake_sync_source", "fake-instance", "child-2"
+    )
+    assert child is not None and child.deleted_at is None
+
+    # Simulate a partial/incremental pass: `expanded` deliberately omits
+    # every node that actually still exists, exactly what a "changed since
+    # X" delta would look like when nothing changed. walk_complete is left
+    # at its default False.
+    partial_stats = SyncStats(expanded=set())
+    assert partial_stats.walk_complete is False
+
+    await _sweep_stale(node_repo, edge_repo, connector, "fake-instance", partial_stats)
+
+    assert partial_stats.nodes_tombstoned == 0
+    untouched = await node_repo.get_by_technical_identity(
+        "fake_sync_source", "fake-instance", "child-2"
+    )
+    assert untouched.deleted_at is None, (
+        "a partial walk must never tombstone nodes it simply didn't visit"
+    )
 
 
 async def test_structural_edges_created_between_parent_and_children(db_session):

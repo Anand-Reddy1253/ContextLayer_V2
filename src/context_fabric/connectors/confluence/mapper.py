@@ -10,9 +10,9 @@ from __future__ import annotations
 
 import hashlib
 import json
-import re
 from typing import Any
 
+from context_fabric.connectors.cross_references import extract_cross_references
 from context_fabric.domain.connector_types import (
     ACLReference,
     SourceContainer,
@@ -20,37 +20,6 @@ from context_fabric.domain.connector_types import (
     SourceLink,
     SourceObject,
 )
-
-_MENTION_PATTERN = re.compile(r"AB#(\d+)")
-_PR_MENTION_PATTERN = re.compile(r"\bPR-(\d+)\b")
-# GitHub's own cross-repo issue/PR reference syntax ("owner/repo#42") —
-# fully qualified, so unlike GitHub's own same-repo "#NN" shorthand
-# (meaningless without a repo to resolve against, which a Confluence page
-# doesn't have), this is directly resolvable on its own.
-_GITHUB_CROSS_REPO_REF_PATTERN = re.compile(r"\b([\w.-]+/[\w.-]+)#(\d+)\b")
-# Jira's own issue-key shape ("PROJ-123") — see
-# synchronization/link_extraction.py's LINK_PATTERNS for why this is
-# resolvable on its own without a repo/instance qualifier.
-_JIRA_KEY_PATTERN = re.compile(r"\b([A-Z][A-Z0-9]{1,9}-\d+)\b")
-# Confluence's own internal page-to-page link macro
-# (`<ac:link><ri:page ri:content-id="12345" /></ac:link>`) — a real,
-# human-placed cross-reference between two pages, distinct from the
-# parent/child CONTAINS hierarchy already captured structurally. Only
-# `ri:content-id` is matched (a direct, reliable native_id), not
-# `ri:content-title` (would need name-based resolution, a different
-# mechanism than the native_id-based LINK_PATTERNS this project already
-# has — out of scope for this pass).
-_INTERNAL_PAGE_LINK_PATTERN = re.compile(r'ri:content-id="(\d+)"')
-
-
-def _snippet(text: str, match_start: int, match_end: int, *, radius: int = 80) -> str:
-    """The window of text around a regex match, shown to a Proposed
-    Links reviewer as evidence for why an edge was proposed."""
-    start = max(0, match_start - radius)
-    end = min(len(text), match_end + radius)
-    prefix = "…" if start > 0 else ""
-    suffix = "…" if end < len(text) else ""
-    return f"{prefix}{text[start:end].strip()}{suffix}"
 
 
 def _content_hash(raw: dict[str, Any]) -> str:
@@ -74,9 +43,7 @@ def map_space(raw: dict[str, Any]) -> SourceContainer:
 
 
 def map_page(raw: dict[str, Any]) -> SourceObject:
-    parent_native_id = (
-        str(raw["parentId"]) if raw.get("parentId") else str(raw["spaceId"])
-    )
+    parent_native_id = str(raw["parentId"]) if raw.get("parentId") else str(raw["spaceId"])
     return SourceObject(
         native_id=str(raw["id"]),
         kind="PAGE",
@@ -88,6 +55,7 @@ def map_page(raw: dict[str, Any]) -> SourceObject:
             "labels": raw.get("labels", []),
             "author_id": raw.get("authorId", ""),
             "updated_at": raw.get("updatedAt", ""),
+            "created_at": raw.get("createdAt", ""),
             # Deliberately not the page body — it's HTML and can be
             # large; ADR-003 fetches full content on-demand via
             # get_content()/map_page_content() rather than eagerly
@@ -149,58 +117,22 @@ def map_comment_content(native_id: str, raw_comment: dict[str, Any]) -> SourceCo
     )
 
 
-def map_links_from_text(native_id: str, text: str) -> list[SourceLink]:
-    """AB#123 (Azure Boards work item) and PR-42 (pull request) style
-    mentions in page/comment body text — the same cross-reference
-    convention already recognized from GitHub commit messages and ADO
-    descriptions (docs/CONNECTORS.md "Link extraction")."""
-    links = [
-        SourceLink(
-            from_native_id=native_id,
-            target_ref=f"AB#{m.group(1)}",
-            link_kind="mentions",
-            evidence=f'Found in the page body: "{_snippet(text, m.start(), m.end())}"',
-        )
-        for m in _MENTION_PATTERN.finditer(text)
-    ]
-    links += [
-        SourceLink(
-            from_native_id=native_id,
-            target_ref=f"PR-{m.group(1)}",
-            link_kind="mentions",
-            evidence=f'Found in the page body: "{_snippet(text, m.start(), m.end())}"',
-        )
-        for m in _PR_MENTION_PATTERN.finditer(text)
-    ]
-    links += [
-        SourceLink(
-            from_native_id=native_id,
-            target_ref=f"{m.group(1)}#{m.group(2)}",
-            link_kind="mentions",
-            evidence=f'Found in the page body: "{_snippet(text, m.start(), m.end())}"',
-        )
-        for m in _GITHUB_CROSS_REPO_REF_PATTERN.finditer(text)
-    ]
-    links += [
-        SourceLink(
-            from_native_id=native_id,
-            target_ref=m.group(1),
-            link_kind="mentions",
-            evidence=f'Found in the page body: "{_snippet(text, m.start(), m.end())}"',
-        )
-        for m in _JIRA_KEY_PATTERN.finditer(text)
-    ]
-    links += [
-        SourceLink(
-            from_native_id=native_id,
-            target_ref=f"CONFPAGE-{m.group(1)}",
-            link_kind="relates_to",
-            evidence="Confluence's own internal page-link macro (ri:content-id) in the page body.",
-        )
-        for m in _INTERNAL_PAGE_LINK_PATTERN.finditer(text)
-        if m.group(1) != native_id  # a page linking to itself isn't a real edge
-    ]
-    return links
+def map_links_from_text(
+    native_id: str, text: str, *, location: str = "page_body"
+) -> list[SourceLink]:
+    """Cross-references out of a page or comment body. Patterns are shared
+    (connectors/cross_references.py) so this connector recognizes the same
+    shapes as every other. Page bodies default to location="page_body",
+    which types the resulting edge as SPECIFIED_BY rather than a bare
+    mention — a spec page naming a work item is documenting it."""
+    return extract_cross_references(
+        native_id,
+        text,
+        location=location,
+        where_label="page body",
+        # A page linking to itself isn't a real edge.
+        skip_ref=lambda ref: ref == f"CONFPAGE-{native_id}",
+    )
 
 
 def map_acl(raw: dict[str, Any]) -> ACLReference:

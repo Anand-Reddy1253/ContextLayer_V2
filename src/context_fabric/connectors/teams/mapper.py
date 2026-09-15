@@ -18,9 +18,9 @@ from __future__ import annotations
 
 import hashlib
 import json
-import re
 from typing import Any
 
+from context_fabric.connectors.cross_references import extract_cross_references
 from context_fabric.domain.connector_types import (
     ACLReference,
     SourceContainer,
@@ -28,14 +28,6 @@ from context_fabric.domain.connector_types import (
     SourceLink,
     SourceObject,
 )
-
-_MENTION_PATTERN = re.compile(r"AB#(\d+)")
-_PR_MENTION_PATTERN = re.compile(r"\bPR-(\d+)\b")
-_GITHUB_CROSS_REPO_REF_PATTERN = re.compile(r"\b([\w.-]+/[\w.-]+)#(\d+)\b")
-# Jira's own issue-key shape ("PROJ-123") — see
-# synchronization/link_extraction.py's LINK_PATTERNS for why this is
-# resolvable on its own without a repo/instance qualifier.
-_JIRA_KEY_PATTERN = re.compile(r"\b([A-Z][A-Z0-9]{1,9}-\d+)\b")
 
 
 def _content_hash(raw: dict[str, Any]) -> str:
@@ -124,25 +116,9 @@ def map_links(raw: dict[str, Any]) -> list[SourceLink]:
     text is already scanned for (docs/CONNECTORS.md "Link extraction")."""
     native_id = raw["id"]
     text = raw.get("body_text", "") or ""
-    links = [
-        SourceLink(from_native_id=native_id, target_ref=f"AB#{m.group(1)}", link_kind="mentions")
-        for m in _MENTION_PATTERN.finditer(text)
-    ]
-    links += [
-        SourceLink(from_native_id=native_id, target_ref=f"PR-{m.group(1)}", link_kind="mentions")
-        for m in _PR_MENTION_PATTERN.finditer(text)
-    ]
-    links += [
-        SourceLink(
-            from_native_id=native_id, target_ref=f"{m.group(1)}#{m.group(2)}", link_kind="mentions"
-        )
-        for m in _GITHUB_CROSS_REPO_REF_PATTERN.finditer(text)
-    ]
-    links += [
-        SourceLink(from_native_id=native_id, target_ref=m.group(1), link_kind="mentions")
-        for m in _JIRA_KEY_PATTERN.finditer(text)
-    ]
-    return links
+    # A chat message is the weakest place a reference can appear — shared
+    # patterns, but location="comment" keeps it a plain MENTIONS edge.
+    return extract_cross_references(native_id, text, location="comment", where_label="chat message")
 
 
 def map_acl(raw: dict[str, Any]) -> ACLReference:

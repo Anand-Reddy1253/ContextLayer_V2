@@ -86,6 +86,7 @@ def _normalize_login(org: str) -> str:
         org = org.split("github.com/", 1)[1]
     return org.split("/", 1)[0]
 
+
 # Projects (v2) has no REST equivalent — owner-scoped boards plus a
 # shallow read of each item's linked content, enough to identify what it
 # points at (docs/CONNECTORS.md "Entity type selection"). GitHub's
@@ -135,6 +136,16 @@ class GitHubLiveConnector(LiveConnectorBase):
         "pull_requests": "Pull Requests",
         "projects": "Projects (v2)",
         "ai_assets": "AI Explorer (agents/skills/rules under .github, .claude, .cursor)",
+    }
+
+    # See AzureDevOpsLiveConnector.ENTITY_TYPE_KINDS — same purpose: lets
+    # the tombstone sweep skip only the degraded entity type's own kinds
+    # instead of this connector's whole sweep.
+    ENTITY_TYPE_KINDS: ClassVar[dict[str, set[str]]] = {
+        "issues": {"ISSUE"},
+        "pull_requests": {"PULL_REQUEST"},
+        "projects": {"PROJECT_BOARD", "PROJECT_ITEM"},
+        "ai_assets": {"AI_ASSET"},
     }
 
     def __init__(
@@ -376,6 +387,17 @@ class GitHubLiveConnector(LiveConnectorBase):
             "head_ref": (pr.get("head") or {}).get("ref"),
             "base_ref": (pr.get("base") or {}).get("ref"),
             "html_url": pr.get("html_url", ""),
+            # Timestamps and author come back in the same /pulls response
+            # and were being dropped here — which is why PR timestamp
+            # coverage measured 0/138 and no cycle-time, stale-PR or
+            # throughput question was answerable.
+            "created_at": pr.get("created_at"),
+            "updated_at": pr.get("updated_at"),
+            "closed_at": pr.get("closed_at"),
+            "merged_at": pr.get("merged_at"),
+            "author": (pr.get("user") or {}).get("login"),
+            "is_draft": pr.get("draft"),
+            "labels": [lbl.get("name") for lbl in pr.get("labels") or [] if lbl.get("name")],
         }
 
     async def _ensure_pull_requests(self, repo_full_name: str) -> list[dict[str, Any]]:
@@ -444,9 +466,7 @@ class GitHubLiveConnector(LiveConnectorBase):
         repo_data = next(r for r in repos if r["full_name"] == repo_full_name)
         branch = repo_data.get("default_branch", "main")
         try:
-            branch_data = await self._request(
-                "GET", f"/repos/{repo_full_name}/branches/{branch}"
-            )
+            branch_data = await self._request("GET", f"/repos/{repo_full_name}/branches/{branch}")
             sha = branch_data["commit"]["sha"]
             tree_data = await self._request(
                 "GET",
@@ -673,14 +693,38 @@ class GitHubLiveConnector(LiveConnectorBase):
                 }
             )
 
+        # AI assets (agent/skill/rule definitions) — the body is what makes
+        # one runnable: a caller discovers "this repo has a security-auditor
+        # agent" through the catalog, then fetches the definition here and
+        # hands it to whatever runtime actually executes agents. Fetched
+        # from the default branch, since that's where _ensure_ai_assets
+        # listed them.
+        ai_asset = mapper.parse_ai_asset_ref(native_id)
+        if ai_asset is not None:
+            repo_full_name, asset_path = ai_asset
+            repo_data = await self._request("GET", f"/repos/{repo_full_name}")
+            data = await self._request(
+                "GET",
+                f"/repos/{repo_full_name}/contents/{asset_path}",
+                params={"ref": repo_data.get("default_branch", "main")},
+            )
+            return mapper.map_content(
+                {
+                    "native_id": native_id,
+                    "mime_type": "text/markdown",
+                    "text": base64.b64decode(data.get("content", "")).decode(
+                        "utf-8", errors="replace"
+                    ),
+                    "url": data.get("html_url", ""),
+                }
+            )
+
         repo, branch, path = mapper.parse_ref(native_id)
         if path is None:
             raise NotFound(
                 f"no content for native_id={native_id!r}", source_system=self.source_system
             )
-        data = await self._request(
-            "GET", f"/repos/{repo}/contents/{path}", params={"ref": branch}
-        )
+        data = await self._request("GET", f"/repos/{repo}/contents/{path}", params={"ref": branch})
         text = base64.b64decode(data.get("content", "")).decode("utf-8", errors="replace")
         content_raw = {
             "native_id": native_id,
@@ -705,18 +749,36 @@ class GitHubLiveConnector(LiveConnectorBase):
         # live testing: "AB#56 Assign skills to an employee profile" put
         # the whole reference in the title with an empty body, which the
         # body-only scan silently missed.
+        # Title and body are scanned *separately*, not concatenated. Where a
+        # reference sits is the strongest signal about what it means: a work
+        # item id in a pull request title is the author declaring "this PR
+        # does that work" (an IMPLEMENTS edge, confident enough to skip
+        # review), while the same id in the body is a mention. Concatenating
+        # them threw that signal away and scored both as weakly as possible —
+        # which matters most here, since GitHub PRs are where this project's
+        # real cross-system references to Azure Boards actually live.
         if native_id in self._commit_by_sha:
             repo_full_name = native_id.split("@", 1)[0]
             message = self._commit_by_sha[native_id]["message"]
-            return mapper.map_links_from_text(native_id, message, repo_full_name=repo_full_name)
+            return mapper.map_links_from_text(
+                native_id, message, repo_full_name=repo_full_name, location="commit_message"
+            )
         if native_id in self._issue_by_native_id:
             issue = self._issue_by_native_id[native_id]
-            text = f"{issue.get('title') or ''}\n{issue.get('body') or ''}"
-            return mapper.map_links_from_text(native_id, text, repo_full_name=issue["repo"])
+            return mapper.map_links_from_text(
+                native_id, issue.get("title") or "", repo_full_name=issue["repo"],
+                location="title",
+            ) + mapper.map_links_from_text(
+                native_id, issue.get("body") or "", repo_full_name=issue["repo"],
+                location="body",
+            )
         if native_id in self._pull_request_by_native_id:
             pr = self._pull_request_by_native_id[native_id]
-            text = f"{pr.get('title') or ''}\n{pr.get('body') or ''}"
-            return mapper.map_links_from_text(native_id, text, repo_full_name=pr["repo"])
+            return mapper.map_links_from_text(
+                native_id, pr.get("title") or "", repo_full_name=pr["repo"], location="title"
+            ) + mapper.map_links_from_text(
+                native_id, pr.get("body") or "", repo_full_name=pr["repo"], location="body"
+            )
         return []
 
     async def get_acl_reference(self, native_id: str) -> ACLReference:

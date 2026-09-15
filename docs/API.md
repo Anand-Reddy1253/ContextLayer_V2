@@ -39,6 +39,50 @@ is exposed read-only, always (ADR-009).
 | GET | `/api/catalog/nodes/{id}/children` | Native-hierarchy children, paginated |
 | GET | `/api/catalog/search` | `?q=&source_system=&kind=&capability=` — metadata search, no embeddings (ADR-006) |
 
+### Entity query
+
+A structured alternative to `/search`, which can only AND a handful of scalar
+params. Grammar lives in `domain/query.py`, compiled to SQL by
+`retrieval/query_compiler.py`. Deliberately modelled on Port.io's search syntax
+so an agent that knows that dialect can use this one.
+
+| Method | Path | Notes |
+|---|---|---|
+| POST | `/api/catalog/entities/search` | `{query, limit}` — rule grammar; returns the lean shape below |
+| POST | `/api/catalog/entities/aggregate` | `{query, group_by[]}` — live GROUP BY, no precomputed aggregates |
+| GET | `/api/catalog/schema` | `?kind=` — queryable kinds, their attribute keys, relation types |
+
+```jsonc
+{"combinator": "and", "rules": [
+  {"property": "$blueprint", "operator": "=",  "value": "STORY"},
+  {"property": "state",      "operator": "!=", "value": "Done"},
+  {"relation": "VERIFIES", "operator": "notRelatedTo", "value": "324"}]}
+```
+
+Properties are `$`-prefixed meta-properties (`$title`, `$blueprint`, `$source`,
+`$path`, `$identifier`, `$createdAt`, `$updatedAt`, `$syncedAt`) or a bare
+`attributes` key. **`$updatedAt` is the vendor's timestamp; `$syncedAt` is
+ours** — they are separate properties because sync touches every node on every
+run, so answering "what changed?" with `$syncedAt` would describe our cron
+schedule rather than any real activity.
+
+Operators: `=` `!=` `contains` `doesNotContain` `beginsWith` `endsWith` `in`
+`notIn` `containsAny` `>` `>=` `<` `<=` `between` `notBetween` `isEmpty`
+`isNotEmpty`, plus `relatedTo` / `notRelatedTo` on relations (with `direction`
+and `maxHops`, resolved through `graph/traversal.py`'s recursive CTE).
+`notRelatedTo` is not a Port operator — it exists because every "what's
+missing" question needs it.
+
+`beginsWith` on `$path` compiles to ltree's `<@` containment rather than a
+string match, so it uses `ix_node_path_gist` and means "everything underneath".
+
+The response is a **shared node dictionary**, not a list of cards: every node
+appears exactly once and is referenced by short id from `anchors` and `edges`.
+Hierarchy travels as each node's `path` and is never re-sent as edges (CONTAINS
+is ~83% of all edges). `rollup` carries counts across the whole match set, which
+is constant-size regardless of how many rows matched. Measured against the
+older `/search-cards` on the same query: 4.9 KB vs 85 KB.
+
 ## Graph — `api/routes/graph.py`
 
 | Method | Path | Notes |

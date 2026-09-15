@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from context_fabric.domain.sync import SyncState
@@ -42,3 +43,10 @@ class SyncStateRepository:
     async def get(self, source_system: str, scope_id: str) -> SyncState | None:
         row = await self._session.get(SyncStateORM, (source_system, scope_id))
         return _to_domain(row) if row is not None else None
+
+    async def list_all(self) -> list[SyncState]:
+        """Every connector instance's current sync state — the source of
+        truth a health/staleness view reads, rather than each caller
+        re-deriving it from SyncRun history."""
+        rows = (await self._session.execute(select(SyncStateORM))).scalars().all()
+        return [_to_domain(r) for r in rows]

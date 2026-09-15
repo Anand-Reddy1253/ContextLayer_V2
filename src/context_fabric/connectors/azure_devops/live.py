@@ -21,9 +21,12 @@ Known simplifications, called out rather than hidden:
     namespace permission check is out of scope for this fast-tracked pass;
     good enough to exist structurally, not a real authorization check.
   - get_changes only reports deletions via the Recycle Bin API, scoped to
-    projects already fetched this session — it does not track a true
-    incremental "since cursor" delta (ADO's work item "changed date"
-    could support that; not implemented here yet).
+    projects already fetched this session.
+  - list_changed_since (duck-typed, not part of SourceConnector) gives
+    synchronization/orchestrator.py's incremental mode a real "since
+    cursor" delta query for work items via System.ChangedDate — but only
+    work items; repos/PRs/builds/pipelines still need a full sync to pick
+    up changes.
   - Builds are not fetched at all yet (mapper.map_build exists for a
     future pass, unused here).
 
@@ -169,6 +172,35 @@ class AzureDevOpsLiveConnector(LiveConnectorBase):
         "pipelines": f"Pipelines + Runs (status only, last {_RUN_HISTORY_RETENTION_DAYS} days)",
         "environments": "Environments",
         "test_runs": f"Test Runs (aggregate pass/fail only, last {_RUN_HISTORY_RETENTION_DAYS} days)",
+    }
+
+    # Which node kinds each entity type produces — synchronization/
+    # orchestrator.py's generalized tombstone sweep uses this to skip
+    # only the kinds whose fetch actually degraded this pass, rather than
+    # skipping the whole connector's sweep over one unrelated optional
+    # type erroring (real case hit in this environment: `environments`
+    # 401 and `test_runs` 400 both fail on this PAT/project every run,
+    # which under a whole-connector skip meant builds/PRs/work items
+    # could never be pruned at all).
+    ENTITY_TYPE_KINDS: ClassVar[dict[str, set[str]]] = {
+        "work_items": {
+            "EPIC",
+            "FEATURE",
+            "STORY",
+            "TASK",
+            "BUG",
+            "WORK_ITEM",
+            "TEST_CASE",
+            "TEST_SUITE",
+            "TEST_PLAN",
+        },
+        "repos": {"GIT_REPOSITORY"},
+        "pull_requests": {"PULL_REQUEST"},
+        "wiki": {"WIKI_PAGE"},
+        "builds": {"BUILD"},
+        "pipelines": {"PIPELINE"},
+        "environments": {"ENVIRONMENT"},
+        "test_runs": {"TEST_RUN"},
     }
 
     def __init__(
@@ -364,9 +396,7 @@ class AzureDevOpsLiveConnector(LiveConnectorBase):
                 # so this project's sync degrades gracefully instead of
                 # failing entirely (docs/CONNECTORS.md "Entity type
                 # selection" — each type is independently best-effort).
-                logger.warning(
-                    "azure_devops.builds_unavailable", project=project, error=str(exc)
-                )
+                logger.warning("azure_devops.builds_unavailable", project=project, error=str(exc))
                 self._mark_degraded("builds", str(exc))
                 self._builds_by_project[project] = []
                 return self._builds_by_project[project]
@@ -491,7 +521,9 @@ class AzureDevOpsLiveConnector(LiveConnectorBase):
                         if case_ref and case_ref.get("id"):
                             self._test_hierarchy_override[str(case_ref["id"])] = suite_id
         except (AuthError, NotFound, Permanent) as exc:
-            logger.warning("azure_devops.test_hierarchy_unavailable", project=project, error=str(exc))
+            logger.warning(
+                "azure_devops.test_hierarchy_unavailable", project=project, error=str(exc)
+            )
 
     def _effective_parent(self, mapped: SourceObject) -> str | None:
         return self._test_hierarchy_override.get(mapped.native_id, mapped.parent_native_id)
@@ -688,6 +720,89 @@ class AzureDevOpsLiveConnector(LiveConnectorBase):
                 kind = mapper.WORK_ITEM_TYPE_TO_KIND.get(entry.get("workItemType", ""), "WORK_ITEM")
                 items.append(mapper.map_tombstone(native_id, kind))
         return ChangePage(items=items, next_cursor=None, has_more=False)
+
+    async def list_changed_since(self, cursor: str | None) -> Page[SourceObject]:
+        """Work items changed since `cursor` (an ISO 8601 timestamp), across
+        every project this connection can see — the incremental
+        counterpart to `_ensure_work_items_fetched`'s full-project WIQL
+        query. Not part of the `SourceConnector` protocol — duck-typed and
+        checked with `hasattr` by `synchronization/orchestrator.py`'s
+        incremental sync mode, so a connector that doesn't implement it
+        (every other one, today) is a graceful full-sync fallback rather
+        than a broken interface.
+
+        Reference implementation, not full incremental coverage: scoped to
+        work items only, the dominant volume here (628 of ~770 nodes at
+        last count) and the one entity type ADO's own `System.ChangedDate`
+        field makes a clean delta query for. Repos/PRs/builds/pipelines
+        still need a full sync to pick up changes — a real limitation,
+        named here rather than silently assumed away.
+
+        `cursor is None` (first incremental run) looks back 24h rather
+        than fetching everything — an unbounded "since the beginning of
+        time" query is just a full sync with extra steps; the first
+        incremental pass genuinely has nothing more recent to report until
+        a full sync has run at least once."""
+        if "work_items" not in self._entity_types:
+            return Page(items=[], next_cursor=cursor)
+
+        since = cursor or (datetime.now(UTC) - timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        projects = await self._project_names()
+        if self._selected_containers is not None:
+            projects &= self._selected_containers
+
+        items: list[SourceObject] = []
+        for project in sorted(projects):
+            wiql = {
+                "query": (
+                    "SELECT [System.Id] FROM WorkItems "
+                    f"WHERE [System.TeamProject] = '{project}' "
+                    f"AND [System.ChangedDate] > '{since}' "
+                    "ORDER BY [System.ChangedDate] ASC"
+                )
+            }
+            try:
+                result = await self._request(
+                    "POST",
+                    # timePrecision=true is required, not optional decor —
+                    # confirmed live: without it ADO rejects any WIQL date
+                    # comparison carrying a time-of-day component at all
+                    # ("You cannot supply a time with the date when running
+                    # a query using date precision"), which is exactly the
+                    # ChangedDate literal below. Its default (date-only
+                    # precision) would silently coarsen a same-day
+                    # incremental cursor to midnight, re-matching every
+                    # item changed earlier the same day on every pass.
+                    f"/{project}/_apis/wit/wiql"
+                    f"?api-version={self._api_version}&timePrecision=true",
+                    json=wiql,
+                )
+            except (AuthError, NotFound, Permanent) as exc:
+                # Same optional-entity-type tolerance as everywhere else in
+                # this connector — one project's permission hiccup must
+                # not take down the whole incremental pass.
+                logger.warning(
+                    "azure_devops.incremental_fetch_failed", project=project, error=str(exc)
+                )
+                continue
+
+            ids = [str(wi["id"]) for wi in result.get("workItems", [])]
+            for batch in _chunk(ids, 200):
+                batch_result = await self._request(
+                    "POST",
+                    f"/_apis/wit/workitemsbatch?api-version={self._api_version}",
+                    json={"ids": [int(i) for i in batch], "$expand": "relations"},
+                )
+                for wi in batch_result.get("value", []):
+                    self._work_items_raw_by_id[str(wi["id"])] = wi
+                    items.append(mapper.map_work_item(wi))
+
+        # The watermark for next time is "now," not the latest item's own
+        # ChangedDate — using an item's timestamp would re-fetch it forever
+        # (it is not strictly greater than itself), and clock skew between
+        # us and ADO is smaller risk than that.
+        new_cursor = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+        return Page(items=items, next_cursor=new_cursor)
 
     async def get_links(self, native_id: str) -> list[SourceLink]:
         if native_id in self._work_items_raw_by_id:

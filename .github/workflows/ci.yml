@@ -1,0 +1,69 @@
+name: CI
+
+# Wires the Makefile targets that already existed with no automation
+# running them — this session's own confidence-policy regression (a
+# change that broke two integration tests) went unnoticed for several
+# turns specifically because nothing ran the suite automatically. Full
+# `pytest` (migration round-trip test included) is safe here, unlike on
+# a local dev machine: the Postgres service below is a disposable
+# container scoped to this one job run, not a real synced database.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e ".[dev]"
+      - run: ruff check .
+      - run: ruff format --check .
+
+  typecheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e ".[dev]"
+      - run: mypy src/
+
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: context_fabric
+          POSTGRES_PASSWORD: context_fabric
+          POSTGRES_DB: context_fabric
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U context_fabric -d context_fabric"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      CF_DATABASE_URL: postgresql+psycopg://context_fabric:context_fabric@localhost:5432/context_fabric
+      # A throwaway key for this ephemeral run only — generated the same
+      # way .env.example instructs (`Fernet.generate_key()`), never a real
+      # secret. Verified it actually satisfies Fernet's 32-byte key
+      # requirement rather than hand-typing something that merely looks
+      # base64-shaped.
+      CF_SECRET_KEY: "VF8quZLSIyPk5bjUkql8Szt_Mey4OkZqLEvy_624BdM="
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e ".[dev]"
+      - run: alembic upgrade head
+      - run: pytest -q

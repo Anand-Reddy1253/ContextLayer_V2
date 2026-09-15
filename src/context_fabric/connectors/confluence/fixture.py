@@ -51,9 +51,7 @@ class ConfluenceFixtureConnector(FixtureConnectorBase):
     async def discover_containers(self) -> list[SourceContainer]:
         return [mapper.map_space(s) for s in self._spaces_raw]
 
-    async def list_children(
-        self, parent_id: str, cursor: str | None = None
-    ) -> Page[SourceObject]:
+    async def list_children(self, parent_id: str, cursor: str | None = None) -> Page[SourceObject]:
         return self._paginate(self._children_of(parent_id), cursor)
 
     def _children_of(self, parent_id: str) -> list[SourceObject]:
@@ -111,9 +109,7 @@ class ConfluenceFixtureConnector(FixtureConnectorBase):
         for c in self._comments_raw:
             if f"COMMENT-{c['id']}" == native_id:
                 return mapper.map_comment_content(native_id, c)
-        raise NotFound(
-            f"no content for native_id={native_id!r}", source_system=self.source_system
-        )
+        raise NotFound(f"no content for native_id={native_id!r}", source_system=self.source_system)
 
     # -- change feed / links / acl ----------------------------------------
 

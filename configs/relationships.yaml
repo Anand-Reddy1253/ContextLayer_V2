@@ -1,0 +1,72 @@
+# Domain/range rules for extracted cross-reference edges
+# (synchronization/link_extraction.py, docs/CONNECTORS.md "Link
+# extraction"). Declares which node *kinds* a given edge type is legal
+# between — the rule that was missing when a work-item-id reference found
+# in a pull request *title* typed itself IMPLEMENTS with nothing checking
+# that the referencing node was actually a pull request, producing
+# STORY --IMPLEMENTS--> STORY.
+#
+# CONTAINS is structural (created directly in synchronization/
+# orchestrator.py from the native parent/child walk) and never passes
+# through this file — only the extracted types below do.
+#
+# `kind_groups` lets a rule name a family instead of enumerating every
+# vendor's spelling of the same concept (ADO's STORY/TASK/BUG, GitHub's
+# ISSUE — all "work item"). `from`/`to` entries are a literal kind, a
+# group name, or "*" for "any kind" — MENTIONS and RELATED_TO stay wide
+# open on purpose: they are the deliberately-loose catch-all a low-
+# confidence text mention becomes (LINK_KIND_BY_LOCATION,
+# connectors/cross_references.py), and over-constraining them would
+# reject real, legitimate loose cross-references.
+
+kind_groups:
+  work_item: [EPIC, FEATURE, STORY, TASK, BUG, WORK_ITEM, ISSUE]
+  test: [TEST_CASE, TEST_SUITE, TEST_PLAN]
+  change: [PULL_REQUEST, COMMIT]
+  document: [PAGE]
+
+relationships:
+  # A test verifies the work item it was written against — never the
+  # reverse (see migration 0016; this rule is what makes that direction
+  # structurally unrepresentable going forward, not just fixed once).
+  - edge: VERIFIES
+    from: [test]
+    to: [work_item]
+
+  # A pull request or commit implements the work item it names in its
+  # title/branch — the one that was previously reachable from any kind at
+  # all, including another work item.
+  - edge: IMPLEMENTS
+    from: [change]
+    to: [work_item]
+
+  # A commit changes the work item it names in its commit message.
+  - edge: CHANGES
+    from: [change]
+    to: [work_item]
+
+  # A document specifies the thing it documents. Not currently emitted
+  # (LINK_KIND_BY_LOCATION routes page-body references to MENTIONS, since
+  # a page merely naming a work item isn't proof it specifies it) —
+  # declared now so the day a genuinely-structured doc-link source exists
+  # (a Confluence "documents" macro, a Jira remote-link typed as such) it
+  # has a rule to land under instead of needing one invented under
+  # pressure.
+  - edge: SPECIFIED_BY
+    from: [document]
+    to: [work_item, change]
+
+  # Work-item-to-work-item structured relations (ADO's own Related/
+  # Dependency-Forward relation fields) — never a test or a change on
+  # either end; those have their own dedicated types above.
+  - edge: DEPENDS_ON
+    from: [work_item]
+    to: [work_item]
+
+  - edge: RELATED_TO
+    from: ["*"]
+    to: ["*"]
+
+  - edge: MENTIONS
+    from: ["*"]
+    to: ["*"]

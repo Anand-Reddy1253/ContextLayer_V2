@@ -49,9 +49,7 @@ class JiraFixtureConnector(FixtureConnectorBase):
     async def discover_containers(self) -> list[SourceContainer]:
         return [mapper.map_project(p) for p in self._projects_raw]
 
-    async def list_children(
-        self, parent_id: str, cursor: str | None = None
-    ) -> Page[SourceObject]:
+    async def list_children(self, parent_id: str, cursor: str | None = None) -> Page[SourceObject]:
         return self._paginate(self._children_of(parent_id), cursor)
 
     def _children_of(self, parent_id: str) -> list[SourceObject]:

@@ -35,6 +35,13 @@ class Settings(BaseSettings):
     CF_LOG_LEVEL: str = "INFO"
     CF_LOG_FORMAT: str = "json"
 
+    # --- Background sync scheduler (synchronization/scheduler.py) ---
+    # Seconds between passes over every configured connection. 0 disables
+    # the scheduler entirely (used by tests and any deployment that only
+    # wants the manual POST /sync trigger). Every pass is a full sync —
+    # see scheduler.py's own docstring for why this isn't incremental.
+    CF_SYNC_INTERVAL_SECONDS: int = 900
+
     # --- CORS ---
     CF_CORS_ORIGINS: str = "http://localhost:5173"
 

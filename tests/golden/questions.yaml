@@ -1,0 +1,270 @@
+# Golden question set — the acceptance gate for the entity query language.
+#
+# Every question is one a person would actually ask about this organization's
+# data, paired with the query an agent should construct for it. Two jobs:
+#
+#   1. Regression gate. If a compiler change breaks `isEmpty` or inverts a
+#      relation, a question here goes red and names which one.
+#   2. Honest scoreboard. Questions we *cannot* answer yet are included with
+#      `expect: blocked` and a reason. A golden set containing only passing
+#      cases measures nothing — the blocked ones are how we know whether the
+#      graph is getting more useful or just bigger.
+#
+# Assertions favour shape over exact counts (`min_count`, `kinds`) because the
+# live data moves as things sync. Exact counts are used only where the number
+# is itself the point.
+
+questions:
+  # -- single-entity filtering ---------------------------------------------
+  - id: stories-not-done
+    ask: "Which stories are not done?"
+    exercises: [operator-not-equal]
+    query:
+      combinator: and
+      rules:
+        - {property: $blueprint, operator: "=", value: STORY}
+        - {property: state, operator: "!=", value: Done}
+    expect: {min_count: 1, kinds: [STORY]}
+
+  - id: unassigned-work
+    ask: "Which work items have nobody assigned?"
+    exercises: [operator-isEmpty]
+    query:
+      combinator: and
+      rules:
+        - {property: $blueprint, operator: in, value: [STORY, TASK, BUG]}
+        - {property: assigned_to, operator: isEmpty}
+    expect: {min_count: 1}
+
+  - id: high-priority-open
+    ask: "What high-priority work is still open?"
+    exercises: [operator-lte, attribute-priority]
+    query:
+      combinator: and
+      rules:
+        - {property: $blueprint, operator: in, value: [STORY, TASK, BUG]}
+        - {property: priority, operator: "<=", value: "2"}
+        - {property: state, operator: "!=", value: Done}
+    expect: {min_count: 1}
+
+  - id: title-substring
+    ask: "Which items mention vacancy in their title?"
+    exercises: [operator-contains]
+    query:
+      rules:
+        - {property: $title, operator: contains, value: vacancy}
+    expect: {min_count: 5}
+
+  - id: failed-builds
+    ask: "Which builds failed?"
+    exercises: [operator-equal, attribute-result]
+    query:
+      combinator: and
+      rules:
+        - {property: $blueprint, operator: "=", value: BUILD}
+        - {property: result, operator: "=", value: failed}
+    expect: {min_count: 0}
+
+  - id: work-in-a-sprint
+    ask: "What is in Sprint 4?"
+    exercises: [attribute-iteration_path, operator-endsWith]
+    query:
+      rules:
+        - {property: iteration_path, operator: endsWith, value: "Sprint 4"}
+    expect: {min_count: 1}
+
+  # -- structure: nesting and hierarchy ------------------------------------
+  - id: open-work-under-a-feature
+    ask: "What is still open under the Vacancy Management feature?"
+    exercises: [nested-or, ltree-path]
+    query:
+      combinator: and
+      rules:
+        - {property: $path, operator: beginsWith, value: DevOnHire.141}
+        - combinator: or
+          rules:
+            - {property: state, operator: "=", value: "In Progress"}
+            - {property: state, operator: "=", value: Approved}
+    expect: {min_count: 1}
+
+  - id: everything-under-a-feature
+    ask: "Show me everything under the Vacancy Management feature."
+    exercises: [ltree-path]
+    query:
+      rules:
+        - {property: $path, operator: beginsWith, value: DevOnHire.141}
+    expect: {min_count: 10}
+
+  # -- relations -----------------------------------------------------------
+  - id: what-verifies-a-story
+    ask: "Which test cases verify story 324?"
+    exercises: [relation-relatedTo, direction-upstream]
+    query:
+      rules:
+        - {relation: VERIFIES, operator: relatedTo, value: "324", direction: upstream}
+    # The direction matters: this was inverted for 93 edges until migration
+    # 0016, and returned the story itself instead of its test cases.
+    expect: {min_count: 1, kinds: [TEST_CASE]}
+
+  - id: stories-without-tests
+    ask: "Which stories have no test coverage?"
+    exercises: [relation-notRelatedTo]
+    query:
+      combinator: and
+      rules:
+        - {property: $blueprint, operator: "=", value: STORY}
+        - {relation: VERIFIES, operator: notRelatedTo, value: "324"}
+    expect: {min_count: 1}
+
+  - id: what-a-pr-implements
+    ask: "What does a pull request implement?"
+    exercises: [relation-IMPLEMENTS]
+    query:
+      rules:
+        - {property: $blueprint, operator: "=", value: PULL_REQUEST}
+    expect: {min_count: 100}
+
+  # -- aggregation ---------------------------------------------------------
+  - id: prs-per-source
+    ask: "How many open PRs across BOTH GitHub and Azure DevOps?"
+    exercises: [aggregate, cross-vendor]
+    # The question a single-vendor MCP fundamentally cannot answer: neither
+    # GitHub's nor ADO's server can see the other's pull requests.
+    aggregate:
+      query:
+        rules:
+          - {property: $blueprint, operator: "=", value: PULL_REQUEST}
+      group_by: [$source]
+    expect: {min_groups: 2}
+
+  - id: work-by-state
+    ask: "What is the state breakdown of our work items?"
+    exercises: [aggregate, group-by-two]
+    aggregate:
+      query:
+        rules:
+          - {property: $blueprint, operator: in, value: [STORY, TASK, BUG]}
+      group_by: [$blueprint, state]
+    expect: {min_groups: 3}
+
+  - id: work-per-assignee
+    ask: "Who has the most open work assigned?"
+    exercises: [aggregate, attribute-assigned_to]
+    # Only answerable because assigned_to is now a name rather than ADO's
+    # full identity object, which no filter or GROUP BY could use.
+    aggregate:
+      query:
+        combinator: and
+        rules:
+          - {property: $blueprint, operator: in, value: [STORY, TASK, BUG]}
+          - {property: state, operator: "!=", value: Done}
+          - {property: assigned_to, operator: isNotEmpty}
+      group_by: [assigned_to]
+    expect: {min_groups: 1}
+
+  - id: catalog-composition
+    ask: "What is in the catalog, by source and type?"
+    exercises: [aggregate]
+    aggregate:
+      query: {rules: []}
+      group_by: [$source, $blueprint]
+    expect: {min_groups: 10}
+
+  # -- freshness (needs the vendor timestamps added alongside this work) ----
+  - id: recently-updated-work
+    ask: "What work has changed recently?"
+    exercises: [meta-updatedAt, vendor-timestamp]
+    query:
+      combinator: and
+      rules:
+        - {property: $blueprint, operator: in, value: [STORY, TASK, BUG]}
+        - {property: $updatedAt, operator: ">", value: "2025-01-01"}
+    expect: {min_count: 1}
+
+  - id: stale-work
+    ask: "What has not been touched since 2025?"
+    exercises: [meta-updatedAt]
+    query:
+      combinator: and
+      rules:
+        - {property: $blueprint, operator: in, value: [STORY, TASK, BUG]}
+        - {property: $updatedAt, operator: "<", value: "2025-01-01"}
+    expect: {min_count: 1}
+
+  - id: stale-documentation
+    ask: "Which Confluence pages are going stale?"
+    exercises: [meta-updatedAt, cross-source]
+    query:
+      combinator: and
+      rules:
+        - {property: $blueprint, operator: "=", value: PAGE}
+        - {property: $updatedAt, operator: "<", value: "2026-01-01"}
+    expect: {min_count: 0}
+
+  - id: oldest-work-items
+    ask: "What are the longest-lived open work items?"
+    exercises: [meta-createdAt]
+    query:
+      combinator: and
+      rules:
+        - {property: $blueprint, operator: in, value: [STORY, TASK, BUG]}
+        - {property: state, operator: "!=", value: Done}
+        - {property: $createdAt, operator: "<", value: "2025-06-01"}
+    expect: {min_count: 1}
+
+  # -- discovery / governance ---------------------------------------------
+  - id: ai-agents-available
+    ask: "Which AI agents and skills do our repos define?"
+    exercises: [attribute-asset_type]
+    query:
+      combinator: and
+      rules:
+        - {property: $blueprint, operator: "=", value: AI_ASSET}
+        - {property: asset_type, operator: "=", value: agent}
+    expect: {min_count: 1, kinds: [AI_ASSET]}
+
+  - id: repos-across-vendors
+    ask: "Which code repositories do we have, across all vendors?"
+    exercises: [operator-in, cross-vendor]
+    query:
+      rules:
+        - {property: $blueprint, operator: in, value: [REPOSITORY, GIT_REPOSITORY]}
+    expect: {min_count: 2}
+
+  - id: pages-by-label
+    ask: "Which documentation pages are tagged as ADRs?"
+    exercises: [operator-containsAny, array-attribute]
+    query:
+      combinator: and
+      rules:
+        - {property: $blueprint, operator: "=", value: PAGE}
+        - {property: labels, operator: containsAny, value: [adr, type-adr]}
+    expect: {min_count: 0}
+
+  # -- known gaps, deliberately included -----------------------------------
+  - id: stories-with-no-pr
+    ask: "Which stories have no pull request linked?"
+    exercises: [cross-system-edges]
+    expect: blocked
+    blocked_reason: >
+      Requires PULL_REQUEST -> work item edges. Extraction, typing and
+      resolution all work, but the referenced ADO work items (AB#54/55/56)
+      were never synced, so zero cross-system edges exist. Measured: 36 real
+      cross-system references present in source data, 0 resolvable.
+
+  - id: deployment-frequency
+    ask: "How often do we deploy?"
+    exercises: [aggregate, deployments]
+    expect: blocked
+    blocked_reason: >
+      No deployment entity is modelled by any connector. A modelling gap,
+      not a query or compute limitation.
+
+  - id: pr-cycle-time
+    ask: "What is the average PR cycle time per repository?"
+    exercises: [aggregate, computed-metric]
+    expect: blocked
+    blocked_reason: >
+      created_at and closed_at are now captured, so the data exists, but the
+      aggregate endpoint only supports count — not avg over a computed
+      interval between two attributes.

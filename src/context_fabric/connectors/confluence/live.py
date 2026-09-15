@@ -199,7 +199,11 @@ class ConfluenceLiveConnector(LiveConnectorBase):
             "body": body,
             "url": raw.get("_links", {}).get("webui", ""),
             "authorId": raw.get("authorId", ""),
+            # Confluence has no "last modified" field — the current
+            # version's own createdAt *is* the last-modified time.
             "updatedAt": (raw.get("version") or {}).get("createdAt", ""),
+            # The page's own creation, distinct from the current version's.
+            "createdAt": raw.get("createdAt", ""),
         }
 
     async def _ensure_attachments_for_page(self, page_id: str) -> list[dict[str, Any]]:
@@ -293,9 +297,7 @@ class ConfluenceLiveConnector(LiveConnectorBase):
             return mapper.map_page_content(native_id, self._page_by_native_id[native_id])
         if native_id in self._comment_by_native_id:
             return mapper.map_comment_content(native_id, self._comment_by_native_id[native_id])
-        raise NotFound(
-            f"no content for native_id={native_id!r}", source_system=self.source_system
-        )
+        raise NotFound(f"no content for native_id={native_id!r}", source_system=self.source_system)
 
     # -- change feed / links / acl ----------------------------------------
 

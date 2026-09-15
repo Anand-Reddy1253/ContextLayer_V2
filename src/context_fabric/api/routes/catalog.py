@@ -21,10 +21,17 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from context_fabric.api.deps import get_session
 from context_fabric.domain.edge import Edge
 from context_fabric.domain.enums import EdgeOrigin, EdgeState, EdgeType, Layer
+from context_fabric.domain.query import AggregateQuery, EntityQuery
+from context_fabric.persistence.orm.edge import EdgeORM
 from context_fabric.persistence.orm.node import NodeORM
 from context_fabric.persistence.repositories.context_space import ContextSpaceRepository
 from context_fabric.persistence.repositories.edge import EdgeRepository
 from context_fabric.persistence.repositories.node import NodeRepository
+from context_fabric.retrieval.query_compiler import (
+    QueryError,
+    compile_group,
+    resolve_relations,
+)
 
 router = APIRouter(prefix="/api/catalog", tags=["catalog"])
 
@@ -627,7 +634,7 @@ def _reachable_ids(
         reachable = {
             nid
             for nid in reachable
-            if _KIND_CAPABILITY.get(node_kind_by_id.get(nid)) not in exclude_capabilities
+            if _KIND_CAPABILITY.get(node_kind_by_id.get(nid) or "") not in exclude_capabilities
         }
     return reachable
 
@@ -857,7 +864,11 @@ async def kind_counts(
         )
 
     stmt = (
-        select(NodeORM.source_system, NodeORM.kind, func.count().label("count"))
+        # Labelled node_count, not count: SQLAlchemy Row exposes labels as
+        # attributes, and a label of "count" collides with the tuple's own
+        # .count() method — it resolves to the label at runtime, but only
+        # by luck of precedence, and it type-checks as the method.
+        select(NodeORM.source_system, NodeORM.kind, func.count().label("node_count"))
         .where(NodeORM.deleted_at.is_(None), NodeORM.layer == Layer.TECHNICAL.value)
         .group_by(NodeORM.source_system, NodeORM.kind)
     )
@@ -876,9 +887,9 @@ async def kind_counts(
         stmt = stmt.where(NodeORM.id.in_(real_ids))
     rows = (await session.execute(stmt)).all()
     return [
-        {"source_system": r.source_system, "kind": r.kind, "count": r.count}
+        {"source_system": r.source_system, "kind": r.kind, "count": r.node_count}
         for r in rows
-        if r.count > 0
+        if r.node_count > 0
     ]
 
 
@@ -939,3 +950,264 @@ async def search_nodes(
         rows = [r for r in rows if str(r.id) in scope_ids][: min(limit, 500)]
     node_repo = NodeRepository(session)
     return [_node_json(await node_repo.get(r.id)) for r in rows]
+
+
+# ---------------------------------------------------------------------------
+# Entity query — the structured surface (docs/API.md "Entity query")
+# ---------------------------------------------------------------------------
+
+# Attribute keys promoted onto a node in the lean response when present. Kept
+# short on purpose: this response is read by an agent paying per token, and the
+# full attribute bag is one expand call away.
+_SUMMARY_ATTRS = ("state", "status", "result", "priority", "assigned_to", "updated_at")
+
+
+def _entity_json(row: NodeORM, *, anchor: bool) -> dict[str, Any]:
+    """One node in the shared `nodes` dictionary.
+
+    Anchors (the actual matches) carry a full `locator` so a caller can hand
+    them straight to the vendor's own MCP server; everything else — ancestors,
+    link counterparts — carries only what's needed to recognize it, because
+    those are context rather than answers. Measured: embedding a full node per
+    link cost 1.83 KB each and made a 10-result search 85 KB.
+    """
+    attrs = row.attributes or {}
+    entry: dict[str, Any] = {"kind": row.kind, "name": row.name, "path": row.path}
+    for key in _SUMMARY_ATTRS:
+        if attrs.get(key) not in (None, ""):
+            entry[key] = attrs[key]
+    if anchor:
+        entry["locator"] = {
+            "source_system": row.source_system,
+            "native_id": row.native_id,
+            "url": attrs.get("url") or None,
+        }
+    else:
+        entry["src"] = row.source_system
+        entry["native_id"] = row.native_id
+    return entry
+
+
+def _rollup(rows: list[NodeORM]) -> dict[str, Any]:
+    """Counts over the whole match set.
+
+    Constant-size regardless of how many rows matched, which is what makes a
+    vague question ("what's the state of auth work?") answerable without
+    returning the rows at all — and unlike truncation it never misrepresents
+    how much exists.
+    """
+    by_kind: dict[str, int] = {}
+    by_state: dict[str, int] = {}
+    by_source: dict[str, int] = {}
+    for row in rows:
+        by_kind[row.kind] = by_kind.get(row.kind, 0) + 1
+        if row.source_system:
+            by_source[row.source_system] = by_source.get(row.source_system, 0) + 1
+        state = (row.attributes or {}).get("state") or (row.attributes or {}).get("status")
+        if state:
+            by_state[str(state)] = by_state.get(str(state), 0) + 1
+    out: dict[str, Any] = {"matched": len(rows), "by_kind": by_kind, "by_source": by_source}
+    if by_state:
+        out["by_state"] = by_state
+    return out
+
+
+@router.post("/entities/search")
+async def search_entities(
+    request: EntityQuery, session: AsyncSession = Depends(get_session)
+) -> dict[str, Any]:
+    """Structured entity search (docs/API.md "Entity query").
+
+    Takes the rule grammar in domain/query.py — combinator + nested rules,
+    operators, and `relatedTo` graph traversal — and returns the lean shape:
+    a shared `nodes` dictionary with every node appearing exactly once,
+    `anchors` referencing into it, semantic `edges` as triples, and a `rollup`.
+
+    Hierarchy is *not* returned as edges: `path` already encodes the full
+    ancestor chain, and CONTAINS is 83% of all edges. Sending it would be
+    re-sending what `path` already says.
+    """
+    try:
+        relations = await resolve_relations(session, request.query)
+        predicate = compile_group(request.query, relations)
+    except QueryError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+    stmt = (
+        select(NodeORM)
+        .where(NodeORM.deleted_at.is_(None), predicate)
+        .order_by(NodeORM.name)
+        .limit(request.limit)
+    )
+    anchors = list((await session.execute(stmt)).scalars().all())
+    anchor_ids = [a.id for a in anchors]
+
+    nodes: dict[str, NodeORM] = {str(a.id): a for a in anchors}
+
+    # Ancestors, resolved once each rather than per-anchor. The same project
+    # node was previously repeated in all 10 cards of a 10-result response.
+    ancestor_paths = {
+        ".".join(a.path.split(".")[:i])
+        for a in anchors
+        for i in range(1, len(a.path.split(".")))
+    }
+    if ancestor_paths:
+        anc_stmt = select(NodeORM).where(
+            NodeORM.path.in_(ancestor_paths), NodeORM.deleted_at.is_(None)
+        )
+        for row in (await session.execute(anc_stmt)).scalars().all():
+            nodes.setdefault(str(row.id), row)
+
+    # Semantic edges only — all of them. They are sparse by nature (a repo has
+    # hundreds of PRs but a handful of "this PR implements that ticket" links),
+    # so there is nothing to gain by truncating and real meaning to lose.
+    edges: list[dict[str, str]] = []
+    if anchor_ids:
+        edge_stmt = select(EdgeORM).where(
+            EdgeORM.deleted_at.is_(None),
+            EdgeORM.type != EdgeType.CONTAINS.value,
+            EdgeORM.src_id.in_(anchor_ids) | EdgeORM.dst_id.in_(anchor_ids),
+        )
+        edge_rows = list((await session.execute(edge_stmt)).scalars().all())
+        counterpart_ids = {
+            e.dst_id if e.src_id in set(anchor_ids) else e.src_id for e in edge_rows
+        } - set(anchor_ids)
+        if counterpart_ids:
+            cp_stmt = select(NodeORM).where(
+                NodeORM.id.in_(counterpart_ids), NodeORM.deleted_at.is_(None)
+            )
+            for row in (await session.execute(cp_stmt)).scalars().all():
+                nodes.setdefault(str(row.id), row)
+        edges = [
+            {"src": str(e.src_id), "type": e.type, "dst": str(e.dst_id)}
+            for e in edge_rows
+            if str(e.src_id) in nodes and str(e.dst_id) in nodes
+        ]
+
+    # Short refs keep the payload small and make the edge triples readable.
+    ref_by_id = {node_id: f"n{i}" for i, node_id in enumerate(nodes, start=1)}
+    anchor_id_set = {str(a.id) for a in anchors}
+
+    return {
+        "rollup": _rollup(anchors),
+        "anchors": [{"ref": ref_by_id[str(a.id)]} for a in anchors],
+        "nodes": {
+            ref_by_id[node_id]: _entity_json(row, anchor=node_id in anchor_id_set)
+            for node_id, row in nodes.items()
+        },
+        "edges": [
+            {"src": ref_by_id[e["src"]], "type": e["type"], "dst": ref_by_id[e["dst"]]}
+            for e in edges
+        ],
+        "expand": {"node": "/api/catalog/nodes/{id}/links"},
+    }
+
+
+@router.post("/entities/aggregate")
+async def aggregate_entities(
+    request: AggregateQuery, session: AsyncSession = Depends(get_session)
+) -> list[dict[str, Any]]:
+    """Group-and-count (or avg/min/max/sum/avg_duration_days) over the same
+    filter grammar.
+
+    Computed live in SQL — no precomputed aggregation properties, no sync-time
+    materialization. At this scale a GROUP BY costs less than the machinery
+    needed to keep a cached value honest, and a stale metric is worse than a
+    slow one. `avg_duration_days` is what makes a question like "average PR
+    cycle time per repo" answerable without fetching every PR and computing
+    it in Python — the two-timestamp interval a plain `avg` can't express.
+    """
+    from context_fabric.retrieval.query_compiler import _column_for, compile_metrics
+
+    try:
+        relations = await resolve_relations(session, request.query)
+        predicate = compile_group(request.query, relations)
+        group_cols = [_column_for(p) for p in request.group_by]
+        metric_cols = compile_metrics(request.metrics)
+    except QueryError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+    if not group_cols:
+        raise HTTPException(400, "group_by must name at least one property")
+
+    metric_exprs = [expr.label(key) for key, expr in metric_cols]
+    stmt = (
+        select(*group_cols, *metric_exprs)
+        .where(NodeORM.deleted_at.is_(None), predicate)
+        .group_by(*group_cols)
+        .order_by(metric_exprs[0].desc())
+    )
+    rows = (await session.execute(stmt)).all()
+    metric_keys = [key for key, _ in metric_cols]
+    return [
+        {
+            **dict(zip(request.group_by, row[: len(request.group_by)], strict=True)),
+            **dict(zip(metric_keys, row[len(request.group_by) :], strict=True)),
+        }
+        for row in rows
+    ]
+
+
+@router.get("/schema")
+async def describe_schema(
+    kind: str | None = None, session: AsyncSession = Depends(get_session)
+) -> dict[str, Any]:
+    """What is actually queryable — derived from live data, not declared.
+
+    `node.kind` is a free string with no enum behind it, so the set of
+    "blueprints" only exists as whatever has been synced. An agent cannot write
+    a query without this, and hardcoding a vocabulary would drift the moment a
+    connector adds a type.
+    """
+    kind_stmt = (
+        select(NodeORM.source_system, NodeORM.kind, func.count().label("node_count"))
+        .where(NodeORM.deleted_at.is_(None))
+        .group_by(NodeORM.source_system, NodeORM.kind)
+        .order_by(func.count().desc())
+    )
+    if kind:
+        kind_stmt = kind_stmt.where(NodeORM.kind == kind)
+    kinds = [
+        {"kind": r.kind, "source_system": r.source_system, "count": r.node_count}
+        for r in (await session.execute(kind_stmt)).all()
+    ]
+
+    attr_stmt = (
+        select(NodeORM.kind, func.jsonb_object_keys(NodeORM.attributes).label("attr"))
+        .where(NodeORM.deleted_at.is_(None))
+        .distinct()
+    )
+    if kind:
+        attr_stmt = attr_stmt.where(NodeORM.kind == kind)
+    properties: dict[str, list[str]] = {}
+    for row in (await session.execute(attr_stmt)).all():
+        properties.setdefault(row.kind, []).append(row.attr)
+
+    edge_stmt = (
+        select(EdgeORM.type, func.count().label("edge_count"))
+        .where(EdgeORM.deleted_at.is_(None))
+        .group_by(EdgeORM.type)
+        .order_by(func.count().desc())
+    )
+    relations = [
+        {"relation": r.type, "count": r.edge_count}
+        for r in (await session.execute(edge_stmt)).all()
+    ]
+
+    return {
+        "kinds": kinds,
+        "properties": {k: sorted(v) for k, v in properties.items()},
+        "relations": relations,
+        "meta_properties": [
+            "$identifier",
+            "$title",
+            "$blueprint",
+            "$source",
+            "$layer",
+            "$path",
+            "$description",
+            "$createdAt",
+            "$updatedAt",
+            "$syncedAt",
+        ],
+    }

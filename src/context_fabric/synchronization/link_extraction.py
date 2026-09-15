@@ -24,12 +24,14 @@ import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
+from functools import lru_cache
 from re import Match
 from uuid import UUID
 
 import structlog
 
 from context_fabric.connectors.base import SourceConnector
+from context_fabric.domain.config import RelationshipsConfig, load_relationships
 from context_fabric.domain.edge import Edge
 from context_fabric.domain.enums import EdgeOrigin, EdgeState, EdgeType
 from context_fabric.domain.node import Node
@@ -38,6 +40,17 @@ from context_fabric.persistence.repositories.node import NodeRepository
 from context_fabric.synchronization.idempotency import upsert_edge
 
 logger = structlog.get_logger()
+
+
+@lru_cache(maxsize=1)
+def _relationship_rules() -> RelationshipsConfig:
+    """Loaded once per process, not per call — sync processes many nodes
+    per run and this file never changes mid-run. Module-level cache
+    rather than the eager-at-startup convention domain/config.py's other
+    loaders describe, since nothing in this codebase has a startup hook
+    to call it from yet; this is still "loaded once," just lazily on
+    first use instead of at process boot."""
+    return load_relationships()
 
 # (pattern, target source_system, native_id extractor). Add a row here for
 # each new cross-reference shape a connector's get_links() can produce —
@@ -72,10 +85,36 @@ LINK_PATTERNS: list[LinkPattern] = [
     (re.compile(r"^[A-Z][A-Z0-9]{1,9}-\d+$"), "jira", lambda m: m.group(0)),
 ]
 
-# Extracted edges are proposals, not verified facts — confidence reflects
-# that they came from automated pattern matching, not a human or the
-# source's own structural hierarchy.
-_EXTRACTED_CONFIDENCE = 0.7
+# A link at or above this confidence skips human review entirely:
+# state=ACTIVE, origin=SYNC_STRUCTURAL, same treatment as the structural
+# CONTAINS hierarchy. Below it, the PROPOSED/SYNC_EXTRACTED review-queue
+# path applies. 0.95 rather than 1.0 so a caller can mark something "as
+# good as structural" without needing an exact float match.
+_AUTO_CONFIRM_THRESHOLD = 0.95
+
+# How much a reference resolving is worth, added to the extraction-time
+# prior. SourceLink.confidence is assigned before anything knows whether
+# the referenced object exists; "AB#99999" pointing at nothing is a guess,
+# while "AB#412" resolving to exactly one real work item is a reference
+# whose target demonstrably exists.
+#
+# Why this had to change at all: structured vendor fields are same-system
+# by definition and score 1.0, while a reference to *another* system can
+# only ever be text-mined and scored below the auto-confirm threshold. Since
+# graph/traversal.py walks ACTIVE edges only, every cross-tool edge was
+# invisible from creation, pending a human confirming each one. The policy
+# silently encoded "same-system = trusted, cross-system = guess" — backwards
+# for a context layer whose whole point is cross-tool traceability.
+#
+# A boost rather than a floor, deliberately. Resolution proves the target
+# exists; it does not prove the relationship is meaningful. A work item id
+# in a pull request *title* is the author declaring intent and clears the
+# bar once resolved; the same id in a comment ("unlike AB#412, this...")
+# resolves just as cleanly and still deserves a human look. Flooring every
+# resolved link to the threshold would auto-confirm both and leave the
+# review queue permanently empty — it would have been the same mistake in
+# the opposite direction.
+_RESOLUTION_BOOST = 0.10
 
 
 _EDGE_TYPE_BY_LINK_KIND: dict[str, EdgeType] = {
@@ -83,6 +122,14 @@ _EDGE_TYPE_BY_LINK_KIND: dict[str, EdgeType] = {
     "relates_to": EdgeType.RELATED_TO,
     "verifies": EdgeType.VERIFIES,
     "depends_on": EdgeType.DEPENDS_ON,
+    # These three existed in EdgeType from the start and were never
+    # reachable — no link_kind mapped to them, so every extracted link
+    # became MENTIONS or RELATED_TO regardless of how strong the evidence
+    # was. connectors/cross_references.py now emits them based on where a
+    # reference was found.
+    "implements": EdgeType.IMPLEMENTS,
+    "specifies": EdgeType.SPECIFIED_BY,
+    "changes": EdgeType.CHANGES,
 }
 
 
@@ -94,14 +141,33 @@ def _edge_type_for(link_kind: str) -> EdgeType:
 class LinkExtractionStats:
     edges_created: int = 0
     unresolved: int = 0
+    # A reference resolved to a real node but the (edge_type, src_kind,
+    # dst_kind) triple has no rule in configs/relationships.yaml —
+    # distinct from `unresolved` (target doesn't exist at all). This is
+    # what a STORY--IMPLEMENTS-->STORY attempt becomes now, instead of a
+    # silently-created wrong edge.
+    rejected: int = 0
 
 
 async def _resolve_target(node_repo: NodeRepository, target_ref: str) -> Node | None:
+    """First pattern whose extracted native_id actually resolves to a
+    node wins.
+
+    Deliberately keeps trying after a pattern matches the *shape* but
+    finds nothing: some refs are genuinely ambiguous across systems —
+    "PR-42" is both an Azure DevOps pull request and a syntactically
+    valid Jira issue key, and LINK_PATTERNS' ordering alone can only
+    guess which was meant. Returning on the first shape match (the
+    previous behaviour) meant a ref whose first-listed interpretation
+    didn't exist was dropped even when a later one resolved cleanly."""
     for pattern, source_system, extractor in LINK_PATTERNS:
         match = pattern.match(target_ref)
-        if match:
-            native_id = extractor(match)
-            return await node_repo.get_by_technical_identity_any_instance(source_system, native_id)
+        if not match:
+            continue
+        native_id = extractor(match)
+        found = await node_repo.get_by_technical_identity_any_instance(source_system, native_id)
+        if found is not None:
+            return found
     return None
 
 
@@ -112,10 +178,12 @@ async def extract_links_for_node(
     *,
     from_node_id: UUID,
     from_native_id: str,
+    from_kind: str,
     now: datetime,
 ) -> LinkExtractionStats:
     stats = LinkExtractionStats()
     links = await connector.get_links(from_native_id)
+    rules = _relationship_rules()
 
     for link in links:
         target = await _resolve_target(node_repo, link.target_ref)
@@ -129,13 +197,39 @@ async def extract_links_for_node(
             stats.unresolved += 1
             continue
 
+        # The reference resolved to a real node — raise it above its
+        # extraction-time prior (see _RESOLUTION_BOOST). Capped at 1.0 so a
+        # vendor's own structured field stays exactly 1.0.
+        confidence = min(1.0, link.confidence + _RESOLUTION_BOOST)
+        auto_confirmed = confidence >= _AUTO_CONFIRM_THRESHOLD
+        # link.reverse means the vendor stated the relation from the far
+        # end's point of view (see SourceLink.reverse) — the edge belongs
+        # pointing at the node we're processing, not out of it.
+        src_id, dst_id = (
+            (target.id, from_node_id) if link.reverse else (from_node_id, target.id)
+        )
+        src_kind, dst_kind = (target.kind, from_kind) if link.reverse else (from_kind, target.kind)
+
+        edge_type = _edge_type_for(link.link_kind)
+        if not rules.allows(edge_type, src_kind, dst_kind):
+            logger.warning(
+                "link_extraction.relationship_rejected",
+                from_native_id=from_native_id,
+                target_ref=link.target_ref,
+                edge_type=edge_type.value,
+                src_kind=src_kind,
+                dst_kind=dst_kind,
+            )
+            stats.rejected += 1
+            continue
+
         edge_candidate = Edge(
-            src_id=from_node_id,
-            dst_id=target.id,
-            type=_edge_type_for(link.link_kind),
-            origin=EdgeOrigin.SYNC_EXTRACTED,
-            state=EdgeState.PROPOSED,
-            confidence=_EXTRACTED_CONFIDENCE,
+            src_id=src_id,
+            dst_id=dst_id,
+            type=edge_type,
+            origin=EdgeOrigin.SYNC_STRUCTURAL if auto_confirmed else EdgeOrigin.SYNC_EXTRACTED,
+            state=EdgeState.ACTIVE if auto_confirmed else EdgeState.PROPOSED,
+            confidence=confidence,
             attributes={"evidence": link.evidence} if link.evidence else {},
             first_seen_at=now,
             last_seen_at=now,

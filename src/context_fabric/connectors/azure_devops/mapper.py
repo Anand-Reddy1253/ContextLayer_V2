@@ -13,6 +13,7 @@ import json
 import re
 from typing import Any
 
+from context_fabric.connectors.cross_references import extract_cross_references
 from context_fabric.domain.connector_types import (
     ACLReference,
     SourceContainer,
@@ -37,11 +38,6 @@ WORK_ITEM_TYPE_TO_KIND = {
     "Test Plan": "TEST_PLAN",
 }
 
-_MENTION_PATTERN = re.compile(r"AB#(\d+)")
-# Jira's own issue-key shape ("PROJ-123") — see
-# synchronization/link_extraction.py's LINK_PATTERNS for why this is
-# resolvable on its own without a repo/instance qualifier.
-_JIRA_KEY_PATTERN = re.compile(r"\b([A-Z][A-Z0-9]{1,9}-\d+)\b")
 # ADO's PR artifact link shape is
 # "PullRequestId/{projectId}%2F{repositoryId}%2F{pullRequestId}" — both
 # projectId and repositoryId are GUIDs, so a non-greedy match up to the
@@ -85,6 +81,16 @@ _WORK_ITEM_RELATION_LINK_KIND: dict[str, str] = {
 }
 _WORK_ITEM_RELATION_URL_PATTERN = re.compile(r"/workItems/(\d+)$")
 
+# Relation types whose natural reading runs *towards* the work item being
+# processed, not away from it. "Tested By" sits on the work item and names
+# the test case — meaning "that test case verifies this work item". Emitted
+# forward it produced 93 edges reading STORY --VERIFIES--> TEST_CASE, every
+# one backwards (a test case verifies a story, never the reverse). The
+# SourceLink carries reverse=True and link_extraction.py swaps the
+# endpoints; the alternative would be a VERIFIED_BY edge type, which just
+# moves the same inversion into the vocabulary.
+_REVERSED_RELATION_TYPES = {"Microsoft.VSTS.Common.TestedBy-Forward"}
+
 # Human-readable label for each structured relation type, shown to a
 # reviewer in the Proposed Links queue as the evidence for *why* an edge
 # was proposed (docs/UI.md "Proposed links review queue") — a real ADO
@@ -97,15 +103,27 @@ _RELATION_TYPE_LABEL: dict[str, str] = {
 }
 
 
-def _snippet(text: str, match_start: int, match_end: int, *, radius: int = 80) -> str:
-    """The sentence-ish window of text around a regex match, for showing
-    a reviewer exactly what triggered a proposed edge rather than just
-    the conclusion."""
-    start = max(0, match_start - radius)
-    end = min(len(text), match_end + radius)
-    prefix = "…" if start > 0 else ""
-    suffix = "…" if end < len(text) else ""
-    return f"{prefix}{text[start:end].strip()}{suffix}"
+def _display_name(identity: Any) -> str | None:
+    """A person field as one queryable string.
+
+    ADO returns a full identity object for System.AssignedTo/CreatedBy —
+    id, url, _links, avatar hrefs — which this connector used to store
+    whole. That is unqueryable (`attributes->>'assigned_to'` yields a JSON
+    blob, so "assigned to X" can't be expressed as a filter) and carries
+    avatar/link noise nothing reads. The display name is what a human
+    filters on; the identity id stays reachable via the vendor on demand.
+    """
+    if isinstance(identity, dict):
+        return identity.get("displayName") or identity.get("uniqueName") or None
+    return str(identity) if identity else None
+
+
+def _split_tags(tags: Any) -> list[str]:
+    """ADO serializes System.Tags as "a; b; c" — a list is what the
+    `containsAny` array operator can actually filter on."""
+    if not tags:
+        return []
+    return [t.strip() for t in str(tags).split(";") if t.strip()]
 
 
 def _content_hash(raw: dict[str, Any]) -> str:
@@ -161,8 +179,21 @@ def map_work_item(raw: dict[str, Any]) -> SourceObject:
         attributes={
             "state": fields.get("System.State"),
             "area_path": fields.get("System.AreaPath"),
-            "assigned_to": fields.get("System.AssignedTo"),
+            "assigned_to": _display_name(fields.get("System.AssignedTo")),
             "url": raw.get("url", ""),
+            # Vendor timestamps and the fields a real question filters on.
+            # These already arrive in the payload we fetch — the work-item
+            # batch call uses $expand=relations, which returns every field
+            # as a superset (live.py's own note) — so keeping them costs no
+            # extra API call. Without created_at/updated_at nothing about
+            # age, staleness or cycle time is answerable: measured coverage
+            # of any timestamp on STORY/TASK/BUG was 0%.
+            "created_at": fields.get("System.CreatedDate"),
+            "updated_at": fields.get("System.ChangedDate"),
+            "created_by": _display_name(fields.get("System.CreatedBy")),
+            "priority": fields.get("Microsoft.VSTS.Common.Priority"),
+            "iteration_path": fields.get("System.IterationPath"),
+            "tags": _split_tags(fields.get("System.Tags")),
             # Deliberately not "description" — System.Description is raw
             # HTML and can be large; ADR-003 fetches full content
             # on-demand via get_content()/map_content() rather than
@@ -192,6 +223,14 @@ def map_pull_request(raw: dict[str, Any]) -> SourceObject:
             "source_ref": raw.get("sourceRefName"),
             "target_ref": raw.get("targetRefName"),
             "url": raw.get("url", ""),
+            # Already present in the PR list payload — no extra call. Cycle
+            # time, stale-PR and throughput questions are all unanswerable
+            # without these: timestamp coverage on PULL_REQUEST was 0/138.
+            "created_at": raw.get("creationDate"),
+            "closed_at": raw.get("closedDate"),
+            "created_by": _display_name(raw.get("createdBy")),
+            "is_draft": raw.get("isDraft"),
+            "merge_status": raw.get("mergeStatus"),
         },
         # ADO's own PR list API already truncates this server-side (every
         # real value observed caps at exactly 400 chars) — a genuine
@@ -296,7 +335,8 @@ def map_build_links(raw: dict[str, Any]) -> list[SourceLink]:
                 from_native_id=native_id,
                 target_ref=f"REPO-{repo_id}",
                 link_kind="relates_to",
-                evidence=f"This build's own `repository.id` field, reported by Azure DevOps.",
+                evidence="This build's own `repository.id` field, reported by Azure DevOps.",
+                confidence=1.0,
             )
         )
     pr_number = (raw.get("triggerInfo") or {}).get("pr.number")
@@ -309,6 +349,7 @@ def map_build_links(raw: dict[str, Any]) -> list[SourceLink]:
                 evidence=(
                     f"This build's own `triggerInfo` field says it was triggered by PR #{pr_number}."
                 ),
+                confidence=1.0,
             )
         )
     return links
@@ -381,6 +422,7 @@ def map_links(raw_work_item: dict[str, Any]) -> list[SourceLink]:
                     target_ref=f"PR-{pr_match.group(1)}",
                     link_kind="relates_to",
                     evidence="Azure DevOps pull request artifact link on this work item.",
+                    confidence=1.0,
                 )
             )
             continue
@@ -414,32 +456,31 @@ def map_links(raw_work_item: dict[str, Any]) -> list[SourceLink]:
                             f"Azure DevOps's own '{label}' relation field on work item "
                             f"{native_id} — set directly in ADO, not text-mined."
                         ),
+                        confidence=1.0,
+                        reverse=rel_type in _REVERSED_RELATION_TYPES,
                     )
                 )
 
+    # Title is scanned separately from description, and before it: a work
+    # item id or repo reference in the *title* is a much stronger claim
+    # than the same token buried in a body, and drives a stronger edge
+    # type (connectors/cross_references.py's LINK_KIND_BY_LOCATION).
+    title = raw_work_item["fields"].get("System.Title", "")
+    links += extract_cross_references(
+        native_id,
+        title,
+        location="title",
+        where_label="work item title",
+        skip_ref=lambda ref: ref == f"AB#{native_id}",
+    )
     description = raw_work_item["fields"].get("System.Description", "")
-    for m in _MENTION_PATTERN.finditer(description):
-        links.append(
-            SourceLink(
-                from_native_id=native_id,
-                target_ref=f"AB#{m.group(1)}",
-                link_kind="mentions",
-                evidence=(
-                    f'Found in this work item\'s description: "{_snippet(description, m.start(), m.end())}"'
-                ),
-            )
-        )
-    for m in _JIRA_KEY_PATTERN.finditer(description):
-        links.append(
-            SourceLink(
-                from_native_id=native_id,
-                target_ref=m.group(1),
-                link_kind="mentions",
-                evidence=(
-                    f'Found in this work item\'s description: "{_snippet(description, m.start(), m.end())}"'
-                ),
-            )
-        )
+    links += extract_cross_references(
+        native_id,
+        description,
+        location="description",
+        where_label="work item description",
+        skip_ref=lambda ref: ref == f"AB#{native_id}",
+    )
 
     return links
 

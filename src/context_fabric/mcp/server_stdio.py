@@ -35,9 +35,92 @@ from uuid import UUID
 from mcp.server.mcpserver import MCPServer
 
 from context_fabric.api.routes.catalog import search_cards
+from context_fabric.mcp import tools
 from context_fabric.persistence.session import session_scope
 
 mcp = MCPServer("context-fabric")
+
+
+# Implementations live in mcp/tools.py so an HTTP transport can register the
+# same ones (docs/MCP.md). The decorator reads the signature and docstring at
+# registration time — those *are* the schema and description the model sees, so
+# they belong here rather than being copied across afterwards.
+@mcp.tool()
+async def describe_schema(kind: str | None = None) -> str:
+    """What can be queried — kinds, their properties, and relations.
+
+    Call this before writing a query. The set of kinds is not declared
+    anywhere in code; it is whatever the connectors have actually synced, so
+    guessing a kind name is the most likely way for a query to silently match
+    nothing.
+
+    Args:
+        kind: optional, narrow the answer to one kind.
+    """
+    return await tools.describe_schema_tool(kind)
+
+
+@mcp.tool()
+async def search_entities(query: str, limit: int = 25) -> str:
+    """Search entities with the structured rule grammar.
+
+    `query` is a JSON rule group:
+
+        {"combinator": "and", "rules": [
+           {"property": "$blueprint", "operator": "=",  "value": "STORY"},
+           {"property": "state",      "operator": "!=", "value": "Done"}]}
+
+    Properties are `$`-prefixed meta-properties ($title, $blueprint, $source,
+    $path, $identifier, $createdAt, $updatedAt, $syncedAt) or a bare attribute
+    key from describe_schema. Operators: =, !=, contains, doesNotContain,
+    beginsWith, endsWith, in, notIn, containsAny, >, >=, <, <=, between,
+    notBetween, isEmpty, isNotEmpty.
+
+    Relations traverse the graph:
+
+        {"relation": "VERIFIES", "operator": "relatedTo", "value": "324",
+         "direction": "upstream", "maxHops": 1}
+
+    `notRelatedTo` answers "what's missing" questions — stories with no test
+    coverage, repos with no owning team.
+
+    Returns a shared `nodes` dictionary (each node once, referenced by short
+    id), `anchors` pointing into it, semantic `edges` as triples, and a
+    `rollup` of counts over the whole match set. Hierarchy travels as each
+    node's `path`, not as edges. Anchors carry a `locator` for handing off to
+    the vendor's own MCP server.
+
+    Args:
+        query: the JSON rule group.
+        limit: max anchors to return (default 25).
+    """
+    return await tools.search_entities_tool(query, limit)
+
+
+@mcp.tool()
+async def aggregate_entities(
+    query: str, group_by: list[str], metrics: str | None = None
+) -> str:
+    """Group entities and compute a metric per group — count by default.
+
+    Same rule grammar as search_entities for the filter. Use this instead of
+    fetching rows and computing something yourself — "how many open PRs per
+    repository" or "average PR cycle time per repo" is one call, not N.
+    Computed live, so never stale.
+
+    Args:
+        query: the JSON rule group to filter by.
+        group_by: properties to group on, e.g. ["$source", "state"].
+        metrics: optional JSON array of metric specs. Each is
+            {"op": "count"|"avg"|"sum"|"min"|"max", "property": "..."} or,
+            for a computed interval, {"op": "avg_duration_days",
+            "start": "created_at", "end": "closed_at"} — the metric that
+            answers "average PR cycle time", which a plain avg can't
+            express since it spans two properties, not one. Add
+            {"as": "name"} to control the output key. Defaults to
+            [{"op": "count"}].
+    """
+    return await tools.aggregate_entities_tool(query, group_by, metrics)
 
 
 @mcp.tool()

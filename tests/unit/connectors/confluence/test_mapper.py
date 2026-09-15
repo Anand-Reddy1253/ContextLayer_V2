@@ -11,7 +11,11 @@ SPACE_RAW = {
     "id": "98305",
     "key": "TALENT",
     "name": "TalentFlow",
-    "description": "TalentFlow product documentation.",
+    # v2's description-format=plain shape (mapper.py's map_space docstring
+    # — confirmed against the real live API), not a plain string.
+    "description": {
+        "plain": {"value": "TalentFlow product documentation.", "representation": "plain"}
+    },
     "url": "https://acme.atlassian.net/wiki/spaces/TALENT",
 }
 

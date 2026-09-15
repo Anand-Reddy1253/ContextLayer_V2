@@ -48,9 +48,7 @@ class TeamsFixtureConnector(FixtureConnectorBase):
     async def discover_containers(self) -> list[SourceContainer]:
         return [mapper.map_channel(c) for c in self._channels_raw]
 
-    async def list_children(
-        self, parent_id: str, cursor: str | None = None
-    ) -> Page[SourceObject]:
+    async def list_children(self, parent_id: str, cursor: str | None = None) -> Page[SourceObject]:
         return self._paginate(self._children_of(parent_id), cursor)
 
     def _children_of(self, parent_id: str) -> list[SourceObject]:
@@ -59,9 +57,7 @@ class TeamsFixtureConnector(FixtureConnectorBase):
                 mapper.map_message(m) for m in self._messages_raw if m["channel_id"] == parent_id
             ]
         if parent_id in self._message_ids:
-            return [
-                mapper.map_reply(r) for r in self._replies_raw if r["message_id"] == parent_id
-            ]
+            return [mapper.map_reply(r) for r in self._replies_raw if r["message_id"] == parent_id]
         return []
 
     @staticmethod

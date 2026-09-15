@@ -29,8 +29,10 @@ from context_fabric.persistence.repositories.connector_connection import (
     ConnectorConnectionSummary,
 )
 from context_fabric.persistence.repositories.sync_run import SyncRunRepository
+from context_fabric.persistence.repositories.sync_state import SyncStateRepository
 from context_fabric.settings import Settings
 from context_fabric.synchronization import sync_source
+from context_fabric.synchronization.orchestrator import SyncMode
 
 router = APIRouter(prefix="/api/connectors", tags=["connectors"])
 
@@ -355,6 +357,58 @@ async def _test_connection(
             await connector.aclose()  # type: ignore[attr-defined]
 
 
+@router.get("/health")
+async def connector_health(session: AsyncSession = Depends(get_session)) -> list[dict[str, Any]]:
+    """Per-connection sync freshness — the signal this session's own
+    debugging kept having to reconstruct by hand (checking sync_run rows
+    directly): Confluence failed with a 403 and nothing surfaced that to
+    anyone until someone happened to look. `SyncState` already recorded
+    the truth the whole time; this is just the read path that turns it
+    into "is this connection stale, and since when."
+
+    `stale` is `last_successful_sync` older than 2x the scheduler
+    interval (docs: synchronization/scheduler.py) — twice, not once, so a
+    single slow tick isn't misreported as broken. If the scheduler is
+    disabled (CF_SYNC_INTERVAL_SECONDS=0), a fixed 24h threshold applies
+    instead, since there's no interval to derive one from.
+    """
+    settings = Settings()
+    threshold_seconds = (
+        settings.CF_SYNC_INTERVAL_SECONDS * 2 if settings.CF_SYNC_INTERVAL_SECONDS > 0 else 86400
+    )
+    now = datetime.now(UTC)
+
+    connections = await ConnectorConnectionRepository(session).list_all()
+    states_by_key = {
+        (s.source_system, s.scope_id): s
+        for s in await SyncStateRepository(session).list_all()
+    }
+
+    out: list[dict[str, Any]] = []
+    for conn in connections:
+        state = states_by_key.get((conn.source_system, conn.instance_id))
+        last_success = state.last_successful_sync if state else None
+        age_seconds = (now - last_success).total_seconds() if last_success else None
+        out.append(
+            {
+                "connection_id": str(conn.id),
+                "source_system": conn.source_system,
+                "instance_id": conn.instance_id,
+                "display_name": conn.display_name,
+                "status": state.status.value if state else "NEVER_SYNCED",
+                "last_successful_sync": last_success.isoformat() if last_success else None,
+                "last_reconciliation": (
+                    state.last_reconciliation.isoformat()
+                    if state and state.last_reconciliation
+                    else None
+                ),
+                "error": state.error if state else None,
+                "stale": age_seconds is None or age_seconds > threshold_seconds,
+            }
+        )
+    return out
+
+
 @router.get("/{connection_id}/sync-runs")
 async def list_sync_runs(
     connection_id: UUID, session: AsyncSession = Depends(get_session)
@@ -383,12 +437,21 @@ async def list_sync_runs(
 
 
 @router.post("/{connection_id}/sync", response_model=SyncTriggerResponse)
-async def trigger_sync(connection_id: UUID, session: AsyncSession = Depends(get_session)) -> Any:
+async def trigger_sync(
+    connection_id: UUID,
+    mode: SyncMode = "full",
+    session: AsyncSession = Depends(get_session),
+) -> Any:
     """Runs synchronously and returns once the sync completes — the
     caller sees exactly how long extraction took (docs/UI.md's
     Connectors screen shows this as request latency). A background-task +
     polling design is the more scalable shape for a large org; this is
-    the simpler one, chosen so sync duration is directly observable."""
+    the simpler one, chosen so sync duration is directly observable.
+
+    `mode=incremental` uses the connector's own `list_changed_since` when
+    it has one (today: Azure DevOps work items — see its docstring),
+    falling back to a full pass, logged, when it doesn't
+    (synchronization/orchestrator.py's `sync_source`)."""
     conn_repo = ConnectorConnectionRepository(session)
     connection = await conn_repo.get(connection_id)
     if connection is None:
@@ -408,7 +471,9 @@ async def trigger_sync(connection_id: UUID, session: AsyncSession = Depends(get_
 
     started = time.monotonic()
     try:
-        run = await sync_source(session, connector, source_instance_id=connection.instance_id)
+        run = await sync_source(
+            session, connector, source_instance_id=connection.instance_id, mode=mode
+        )
     except ConnectorError:
         # sync_source records the failed SyncRun (error category + detail)
         # before re-raising (docs/CONNECTORS.md) — the API's job is to

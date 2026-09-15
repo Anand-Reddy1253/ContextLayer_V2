@@ -25,6 +25,7 @@ import json
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from typing import Literal
 
 import structlog
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -64,6 +65,23 @@ class SyncStats:
     # generalized tombstone diff below reuses this instead of asking each
     # connector to implement its own deletion feed.
     expanded: set[str] = field(default_factory=set)
+    # True only once _sync_hierarchy has walked every container to
+    # completion — never set on a partial or incremental pass. _sweep_stale
+    # refuses to run without it: its whole correctness depends on
+    # `expanded` being the *complete* current state, not just what changed.
+    # An incremental ("since last watermark") pass only ever populates a
+    # subset of `expanded` — if that ran through the same sweep, every node
+    # not touched by today's delta would read as "deleted," and every edge
+    # touching it would cascade-delete with it. Today nothing calls
+    # _sweep_stale from anywhere but a full walk, so this can't fire yet —
+    # but that's a convention, and this codebase has already had two
+    # conventions break silently this session (the confidence policy, the
+    # title/body concatenation). This makes the invariant enforced rather
+    # than remembered.
+    walk_complete: bool = False
+
+
+SyncMode = Literal["full", "incremental"]
 
 
 async def sync_source(
@@ -72,10 +90,24 @@ async def sync_source(
     *,
     source_instance_id: str,
     correlation_id: str | None = None,
+    mode: SyncMode = "full",
 ) -> SyncRun:
-    """Runs one full sync pass for `connector`, scoped to
-    `source_instance_id` (e.g. "ado-acme"). Records a SyncRun regardless
-    of outcome; re-raises the connector error after recording failure."""
+    """Runs one sync pass for `connector`, scoped to `source_instance_id`
+    (e.g. "ado-acme"). Records a SyncRun regardless of outcome; re-raises
+    the connector error after recording failure.
+
+    `mode="incremental"` fetches only what changed since the connector's
+    stored cursor (SyncState.cursor) via the connector's own
+    `list_changed_since`, when it has one — duck-typed, not part of
+    `SourceConnector`, since not every connector implements it yet (today:
+    only Azure DevOps work items — see its own docstring). A connector
+    without it falls back to a full pass, logged, rather than silently
+    doing nothing. Either way, an incremental pass never runs either
+    tombstone sweep: `SyncStats.walk_complete` stays False by construction,
+    which `_sweep_stale` already refuses to run without — see that field's
+    docstring for why a partial walk must never be read as "everything
+    else was deleted."
+    """
     node_repo = NodeRepository(session)
     edge_repo = EdgeRepository(session)
     sync_run_repo = SyncRunRepository(session)
@@ -90,9 +122,29 @@ async def sync_source(
             correlation_id=cid,
         )
         try:
-            stats = await _sync_hierarchy(node_repo, edge_repo, connector, source_instance_id)
-            await _sweep_tombstones(node_repo, edge_repo, connector, source_instance_id, stats)
-            await _sweep_stale(node_repo, edge_repo, connector, source_instance_id, stats)
+            actual_mode = mode
+            if mode == "incremental" and not hasattr(connector, "list_changed_since"):
+                structlog.get_logger().info(
+                    "sync.incremental_unsupported_falling_back_to_full",
+                    source_system=connector.source_system,
+                    source_instance_id=source_instance_id,
+                )
+                actual_mode = "full"
+
+            if actual_mode == "incremental":
+                prior_state = await sync_state_repo.get(connector.source_system, source_instance_id)
+                stats, new_cursor = await _sync_incremental(
+                    node_repo,
+                    edge_repo,
+                    connector,
+                    source_instance_id,
+                    cursor=prior_state.cursor if prior_state else None,
+                )
+            else:
+                stats = await _sync_hierarchy(node_repo, edge_repo, connector, source_instance_id)
+                await _sweep_tombstones(node_repo, edge_repo, connector, source_instance_id, stats)
+                await _sweep_stale(node_repo, edge_repo, connector, source_instance_id, stats)
+                new_cursor = None
         except ConnectorError as exc:
             await sync_state_module.finish_run_failure(sync_run_repo, sync_state_repo, run, exc)
             raise
@@ -103,6 +155,8 @@ async def sync_source(
             nodes_upserted=stats.nodes_upserted,
             nodes_tombstoned=stats.nodes_tombstoned,
             edges_created=stats.edges_created,
+            walk_complete=stats.walk_complete,
+            cursor=new_cursor,
         )
 
 
@@ -152,6 +206,7 @@ async def _sync_hierarchy(
             connector,
             from_node_id=result.node.id,
             from_native_id=container.native_id,
+            from_kind=result.node.kind,
             now=now,
         )
         stats.edges_created += link_stats.edges_created
@@ -205,6 +260,7 @@ async def _sync_hierarchy(
                     connector,
                     from_node_id=result.node.id,
                     from_native_id=child.native_id,
+                    from_kind=result.node.kind,
                     now=now,
                 )
                 stats.edges_created += link_stats.edges_created
@@ -218,7 +274,107 @@ async def _sync_hierarchy(
                 break
 
     stats.expanded = expanded
+    # Reached only if the queue drained without raising — every container
+    # was walked to completion, so `expanded` is genuinely the whole
+    # current state, not a partial one. This is the one place it's safe to
+    # set (see the field's own docstring).
+    stats.walk_complete = True
     return stats
+
+
+async def _sync_incremental(
+    node_repo: NodeRepository,
+    edge_repo: EdgeRepository,
+    connector: SourceConnector,
+    source_instance_id: str,
+    *,
+    cursor: str | None,
+) -> tuple[SyncStats, str | None]:
+    """Upserts only what `connector.list_changed_since(cursor)` reports —
+    see `sync_source`'s own docstring for why this never runs either
+    tombstone sweep (`SyncStats.walk_complete` stays at its default False).
+
+    A changed item's parent must already exist for its `path` to be
+    computed — true for anything that was already synced by at least one
+    prior full pass, which is the only situation this is ever called in
+    (`sync_source` falls back to a full pass when there's no cursor-bearing
+    connector support at all). An item whose parent genuinely isn't found
+    is skipped with a warning rather than guessed at; the next full
+    reconciliation pass picks it up correctly, with its real ancestry."""
+    stats = SyncStats()
+    now = datetime.now(UTC)
+    logger = structlog.get_logger()
+
+    page = await connector.list_changed_since(cursor)  # type: ignore[attr-defined]
+    for child in page.items:
+        parent_node = None
+        if child.parent_native_id is not None:
+            parent_node = await node_repo.get_by_technical_identity(
+                connector.source_system, source_instance_id, child.parent_native_id
+            )
+            if parent_node is None:
+                logger.warning(
+                    "sync.incremental_orphan_skipped",
+                    source_system=connector.source_system,
+                    source_instance_id=source_instance_id,
+                    native_id=child.native_id,
+                    parent_native_id=child.parent_native_id,
+                )
+                continue
+
+        path = (
+            f"{parent_node.path}.{sanitize_label(child.native_id)}"
+            if parent_node is not None
+            else sanitize_label(child.native_id)
+        )
+        candidate = Node(
+            layer=Layer.TECHNICAL,
+            kind=child.kind,
+            name=child.name,
+            description=child.description,
+            parent_id=parent_node.id if parent_node is not None else None,
+            path=path,
+            source_system=connector.source_system,
+            source_instance_id=source_instance_id,
+            native_id=child.native_id,
+            attributes=child.attributes,
+            source_version=child.source_version,
+            content_hash=child.content_hash,
+            first_seen_at=now,
+            last_seen_at=now,
+            created_at=now,
+            updated_at=now,
+        )
+        result = await upsert_node(node_repo, candidate)
+        if result.changed:
+            stats.nodes_upserted += 1
+
+        if parent_node is not None:
+            edge_candidate = Edge(
+                src_id=parent_node.id,
+                dst_id=result.node.id,
+                type=EdgeType.CONTAINS,
+                origin=EdgeOrigin.SYNC_STRUCTURAL,
+                first_seen_at=now,
+                last_seen_at=now,
+            )
+            if await upsert_edge(edge_repo, edge_candidate):
+                stats.edges_created += 1
+
+        link_stats = await extract_links_for_node(
+            node_repo,
+            edge_repo,
+            connector,
+            from_node_id=result.node.id,
+            from_native_id=child.native_id,
+            from_kind=result.node.kind,
+            now=now,
+        )
+        stats.edges_created += link_stats.edges_created
+        stats.expanded.add(child.native_id)
+
+    # walk_complete deliberately left False — see SyncStats' own docstring.
+    return stats, page.next_cursor
 
 
 async def _sweep_tombstones(
@@ -266,33 +422,44 @@ async def _sweep_stale(
     for this connector instance but absent from that walk no longer
     exists upstream (or is no longer reachable, same practical effect).
 
-    Skipped entirely — logged, not silently ignored — if *any* optional
-    entity type degraded this pass (connector.degraded_entity_types,
-    set via LiveConnectorBase._mark_degraded): a permission hiccup or
-    transient error on one entity type must never be read as "everything
-    of that type was deleted." Coarse (whole-connector, not just the
-    degraded entity type) on purpose — connectors don't yet report which
-    kinds belong to which entity type, so the safe default is to skip the
-    whole sweep rather than guess.
+    If any optional entity type degraded this pass
+    (connector.degraded_entity_types, set via
+    LiveConnectorBase._mark_degraded — a permission hiccup or transient
+    error, which must never be read as "everything of that type was
+    deleted"), the node *kinds* that entity type produces
+    (connector.ENTITY_TYPE_KINDS, declared per connector) are excluded
+    from this sweep — everything else still gets swept normally. A real
+    case this guards against: `environments` and `test_runs` fail on
+    every sync in this environment (401/400, a permission gap and a
+    known ADO API quirk respectively) — under a whole-connector skip
+    that meant builds, PRs, and work items could never be pruned either,
+    just because two unrelated optional types keep erroring. Falls back
+    to skipping the connector's *entire* sweep, logged, only if it
+    declares no ENTITY_TYPE_KINDS mapping at all — better to skip than
+    guess which kinds a degraded type might own.
 
-    Also skipped whenever this connection narrows sync to a subset of
-    containers (`_selected_containers` — every live connector's project/
-    org/space picker, docs/UI.md "Connectors"): a deselected container's
-    nodes are legitimately absent from `stats.expanded` too, and that's
-    "not synced anymore," not "deleted upstream" — conflating the two
-    would tombstone a whole project's subtree the moment someone narrows
-    their selection. Distinguishing "deselected" from "deleted" precisely
-    would need per-node container ancestry this sweep doesn't have; skip
-    is the safe default here for the same reason as the degraded-entity-
-    type guard above."""
-    degraded = getattr(connector, "degraded_entity_types", None)
-    if degraded:
+    Also skipped entirely whenever this connection narrows sync to a
+    subset of containers (`_selected_containers` — every live
+    connector's project/org/space picker, docs/UI.md "Connectors"): a
+    deselected container's nodes are legitimately absent from
+    `stats.expanded` too, and that's "not synced anymore," not "deleted
+    upstream" — conflating the two would tombstone a whole project's
+    subtree the moment someone narrows their selection. Distinguishing
+    "deselected" from "deleted" precisely would need per-node container
+    ancestry this sweep doesn't have.
+
+    Requires `stats.walk_complete` — see that field's own docstring. This
+    is the load-bearing guard against an incremental ("changed since X")
+    sync pass ever reaching this sweep: `expanded` from a partial walk
+    would make every untouched node look deleted, cascading real edges
+    away along with them. Refusing outright, rather than trusting every
+    future caller to remember not to invoke this on a delta pass."""
+    if not stats.walk_complete:
         structlog.get_logger().warning(
             "sync.stale_sweep_skipped",
             source_system=connector.source_system,
             source_instance_id=source_instance_id,
-            reason="degraded_entity_types",
-            degraded_entity_types=sorted(degraded),
+            reason="walk_incomplete",
         )
         return
     if getattr(connector, "_selected_containers", None) is not None:
@@ -304,9 +471,34 @@ async def _sweep_stale(
         )
         return
 
+    degraded = getattr(connector, "degraded_entity_types", None)
+    skip_kinds: set[str] = set()
+    if degraded:
+        entity_type_kinds = getattr(connector, "ENTITY_TYPE_KINDS", None)
+        if entity_type_kinds is None:
+            structlog.get_logger().warning(
+                "sync.stale_sweep_skipped",
+                source_system=connector.source_system,
+                source_instance_id=source_instance_id,
+                reason="degraded_entity_types_unmapped",
+                degraded_entity_types=sorted(degraded),
+            )
+            return
+        for entity_type in degraded:
+            skip_kinds |= entity_type_kinds.get(entity_type, set())
+        structlog.get_logger().warning(
+            "sync.stale_sweep_kinds_excluded",
+            source_system=connector.source_system,
+            source_instance_id=source_instance_id,
+            degraded_entity_types=sorted(degraded),
+            excluded_kinds=sorted(skip_kinds),
+        )
+
     now = datetime.now(UTC)
     active = await node_repo.list_active_native_ids(connector.source_system, source_instance_id)
-    for node_id, native_id, _kind in active:
+    for node_id, native_id, kind in active:
+        if kind in skip_kinds:
+            continue
         if native_id in stats.expanded:
             continue
         await node_repo.soft_delete(node_id, now)

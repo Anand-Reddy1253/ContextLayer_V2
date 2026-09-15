@@ -18,6 +18,7 @@ from typing import Any
 
 import yaml
 
+from context_fabric.connectors.cross_references import extract_cross_references
 from context_fabric.domain.connector_types import (
     ACLReference,
     SourceContainer,
@@ -25,20 +26,6 @@ from context_fabric.domain.connector_types import (
     SourceLink,
     SourceObject,
 )
-
-# AI Explorer (docs/UI.md "AI Explorer" — pulls agents/skills/rules a repo
-# declares for a coding assistant to use, tagged by which vendor's
-# convention they follow). Each entry is (path-prefix, vendor, asset_type);
-# checked longest-prefix-first isn't needed since prefixes don't overlap.
-def _snippet(text: str, match_start: int, match_end: int, *, radius: int = 80) -> str:
-    """The window of text around a regex match, shown to a Proposed
-    Links reviewer as evidence for why an edge was proposed."""
-    start = max(0, match_start - radius)
-    end = min(len(text), match_end + radius)
-    prefix = "…" if start > 0 else ""
-    suffix = "…" if end < len(text) else ""
-    return f"{prefix}{text[start:end].strip()}{suffix}"
-
 
 AI_ASSET_PATH_RULES: list[tuple[str, str, str]] = [
     (".github/agents/", "github", "agent"),
@@ -93,20 +80,6 @@ def parse_ai_asset_description(text: str, *, fallback_name: str) -> tuple[str, s
             return fallback_name, stripped[:300]
     return fallback_name, ""
 
-_MENTION_PATTERN = re.compile(r"AB#(\d+)")
-# GitHub's own cross-reference syntax — "owner/repo#42" (cross-repo,
-# already fully qualified) and bare "#42" (same-repo, needs the calling
-# repo's full_name to become GitHub's own native_id shape "{repo}#{N}").
-# The negative lookbehind on the same-repo pattern stops it from also
-# matching the "#42" tail of an "owner/repo#42" cross-repo reference —
-# that character is preceded by a repo-name character, never a boundary.
-_GITHUB_CROSS_REPO_REF_PATTERN = re.compile(r"\b([\w.-]+/[\w.-]+)#(\d+)\b")
-_GITHUB_SAME_REPO_REF_PATTERN = re.compile(r"(?<![\w./-])#(\d+)\b")
-# Jira's own issue-key shape ("PROJ-123") — see
-# synchronization/link_extraction.py's LINK_PATTERNS for why this is
-# resolvable on its own without a repo/instance qualifier.
-_JIRA_KEY_PATTERN = re.compile(r"\b([A-Z][A-Z0-9]{1,9}-\d+)\b")
-
 
 def _content_hash(raw: dict[str, Any]) -> str:
     return hashlib.sha256(json.dumps(raw, sort_keys=True, default=str).encode("utf-8")).hexdigest()
@@ -118,6 +91,28 @@ def branch_native_id(repo_full_name: str, branch_name: str) -> str:
 
 def tree_entry_native_id(repo_full_name: str, branch_name: str, path: str) -> str:
     return f"{branch_native_id(repo_full_name, branch_name)}:{path}"
+
+
+_AI_ASSET_MARKER = ":ai-asset:"
+
+
+def ai_asset_native_id(repo_full_name: str, path: str) -> str:
+    return f"{repo_full_name}{_AI_ASSET_MARKER}{path}"
+
+
+def parse_ai_asset_ref(native_id: str) -> tuple[str, str] | None:
+    """(repo_full_name, path) for an AI_ASSET native_id, else None.
+
+    AI assets deliberately don't carry a branch in their native_id (they
+    come from the repo's default branch), so they don't fit parse_ref's
+    "repo@branch:path" shape — which silently returned path=None for them,
+    making get_content() raise NotFound for every agent and skill in the
+    catalog. That meant the AI Explorer could tell you an agent existed
+    but never hand back the definition needed to actually run it."""
+    repo, marker, path = native_id.partition(_AI_ASSET_MARKER)
+    if not marker or not path:
+        return None
+    return repo, path
 
 
 def parse_ref(native_id: str) -> tuple[str, str, str | None]:
@@ -160,7 +155,7 @@ def map_ai_asset(
     repo_full_name: str, path: str, *, vendor: str, asset_type: str, name: str, description: str
 ) -> SourceObject:
     return SourceObject(
-        native_id=f"{repo_full_name}:ai-asset:{path}",
+        native_id=ai_asset_native_id(repo_full_name, path),
         kind="AI_ASSET",
         name=name,
         parent_native_id=repo_full_name,
@@ -219,6 +214,16 @@ def map_pull_request(raw: dict[str, Any]) -> SourceObject:
             "head_ref": raw.get("head_ref"),
             "base_ref": raw.get("base_ref"),
             "url": raw.get("html_url", ""),
+            # Present in the same /pulls payload (live.py's _flatten_pr
+            # carries them through) — cycle time is closed_at/merged_at
+            # minus created_at, and neither existed before.
+            "created_at": raw.get("created_at"),
+            "updated_at": raw.get("updated_at"),
+            "closed_at": raw.get("closed_at"),
+            "merged_at": raw.get("merged_at"),
+            "author": raw.get("author"),
+            "is_draft": raw.get("is_draft"),
+            "labels": raw.get("labels", []),
             # Deliberately not "body" — a real PR description can run to
             # tens of KB (one in this project's own real data is 17.7KB)
             # and ADR-003 fetches full content on-demand via
@@ -245,8 +250,18 @@ def map_issue(raw: dict[str, Any]) -> SourceObject:
         parent_native_id=raw["repo"],
         attributes={
             "state": raw.get("state"),
-            "labels": raw.get("labels", []),
+            # GitHub's /issues payload reaches the mapper unflattened, so
+            # labels arrive as objects — flatten to names so the
+            # `containsAny` array operator can filter on them.
+            "labels": [
+                lbl.get("name") if isinstance(lbl, dict) else lbl
+                for lbl in raw.get("labels") or []
+            ],
             "url": raw.get("html_url", ""),
+            "created_at": raw.get("created_at"),
+            "updated_at": raw.get("updated_at"),
+            "closed_at": raw.get("closed_at"),
+            "author": (raw.get("user") or {}).get("login"),
             # Deliberately not "body" — see map_pull_request's comment.
         },
         content_hash=_content_hash(raw),
@@ -325,53 +340,29 @@ def map_content(raw: dict[str, Any]) -> SourceContent:
 
 
 def map_links_from_text(
-    native_id: str, text: str, *, repo_full_name: str | None = None
+    native_id: str,
+    text: str,
+    *,
+    repo_full_name: str | None = None,
+    location: str = "text",
 ) -> list[SourceLink]:
-    """Cross-reference extraction from a PR body / commit message / issue
-    body — both ADO's "AB#NNN" convention and GitHub's own "#NN"
-    (same-repo) / "owner/repo#NN" (cross-repo) issue-or-PR reference
-    syntax, which this connector previously never looked for at all.
+    """Cross-reference extraction from a PR title/body, commit message or
+    issue body. Patterns live in connectors/cross_references.py so every
+    connector recognizes the same reference shapes — this connector used
+    to carry its own copies and, like the others, was missing some
+    (Confluence page links were unrecognizable from here).
+
     `repo_full_name` resolves a same-repo "#NN" into GitHub's own native_id
     shape ("{repo}#{NN}", used for both Issues and PRs) — without it, only
-    AB# and cross-repo refs (already fully qualified) are extracted."""
-    links = [
-        SourceLink(
-            from_native_id=native_id,
-            target_ref=f"AB#{m.group(1)}",
-            link_kind="mentions",
-            evidence=f'Found in the text: "{_snippet(text, m.start(), m.end())}"',
-        )
-        for m in _MENTION_PATTERN.finditer(text)
-    ]
-    links += [
-        SourceLink(
-            from_native_id=native_id,
-            target_ref=f"{m.group(1)}#{m.group(2)}",
-            link_kind="mentions",
-            evidence=f'Found in the text: "{_snippet(text, m.start(), m.end())}"',
-        )
-        for m in _GITHUB_CROSS_REPO_REF_PATTERN.finditer(text)
-    ]
-    if repo_full_name:
-        links += [
-            SourceLink(
-                from_native_id=native_id,
-                target_ref=f"{repo_full_name}#{m.group(1)}",
-                link_kind="mentions",
-                evidence=f'Found in the text: "{_snippet(text, m.start(), m.end())}"',
-            )
-            for m in _GITHUB_SAME_REPO_REF_PATTERN.finditer(text)
-        ]
-    links += [
-        SourceLink(
-            from_native_id=native_id,
-            target_ref=m.group(1),
-            link_kind="mentions",
-            evidence=f'Found in the text: "{_snippet(text, m.start(), m.end())}"',
-        )
-        for m in _JIRA_KEY_PATTERN.finditer(text)
-    ]
-    return links
+    fully-qualified refs are extracted. `location` says which field the
+    text came from, which drives the relationship type and confidence."""
+    return extract_cross_references(
+        native_id,
+        text,
+        location=location,
+        repo_full_name=repo_full_name,
+        skip_ref=lambda ref: ref == native_id,
+    )
 
 
 def map_acl(raw: dict[str, Any]) -> ACLReference:

@@ -250,17 +250,18 @@ export function GraphView({
         })),
     ];
 
-    // `cose` is a force-directed physics simulation — numIter iterations
-    // over every node pair, cheap for a small result set but a real,
-    // measured multi-second main-thread freeze on the unscoped Enterprise
-    // Graph's ~800 nodes (docs/UI.md "graph readability" — same issue
-    // named there for the hairball look, also the cause of the reported
-    // slowness). `breadthfirst` is built into Cytoscape core (no new
-    // dependency), lays out CONTAINS-dominated data in one O(n) pass
-    // instead, and reads as an actual hierarchy rather than a physics
-    // settling point.
-    const isLarge = visibleNodes.length + clusters.length > 150;
-    const layout: cytoscape.LayoutOptions = isLarge
+    // `cose` (force-directed physics) is the preferred look — user
+    // feedback confirmed the tree layout below is a worse default even
+    // with clustering in place. Sibling-clustering (above) already
+    // removes the actual cost driver (hundreds of same-kind nodes at one
+    // level), so the remaining effective node count after clustering is
+    // usually small even when the raw graph is huge; `cose` now only
+    // steps aside for whatever's left that's still large — numIter also
+    // scales down as that count grows, so it stays responsive instead of
+    // needing a hard cutover to `breadthfirst`'s tree look.
+    const effectiveCount = visibleNodes.length + clusters.length;
+    const isVeryLarge = effectiveCount > 350;
+    const layout: cytoscape.LayoutOptions = isVeryLarge
       ? ({
           name: "breadthfirst",
           directed: true,
@@ -274,7 +275,7 @@ export function GraphView({
           nodeRepulsion: () => 6000,
           idealEdgeLength: () => 50,
           gravity: 40,
-          numIter: 1000,
+          numIter: effectiveCount > 150 ? 400 : 1000,
         } as cytoscape.LayoutOptions);
 
     const cy = cytoscape({

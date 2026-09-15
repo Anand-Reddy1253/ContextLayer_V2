@@ -75,18 +75,14 @@ class SourceConnector(Protocol):
         ADO projects, GitHub orgs/repos."""
         ...
 
-    async def list_children(
-        self, parent_id: str, cursor: str | None = None
-    ) -> Page[SourceObject]:
+    async def list_children(self, parent_id: str, cursor: str | None = None) -> Page[SourceObject]:
         """Paginated children of a container or object, in native
         hierarchy order (docs/CONNECTORS.md "Native hierarchies")."""
         ...
 
     async def get_object(self, native_id: str) -> SourceObject: ...
 
-    async def get_content(
-        self, native_id: str, version: str | None = None
-    ) -> SourceContent:
+    async def get_content(self, native_id: str, version: str | None = None) -> SourceContent:
         """Full body, fetched on demand only (ADR-003) — never called by
         sync itself, only by expand_evidence/refresh_evidence."""
         ...

@@ -19,9 +19,9 @@ from __future__ import annotations
 
 import hashlib
 import json
-import re
 from typing import Any
 
+from context_fabric.connectors.cross_references import extract_cross_references
 from context_fabric.domain.connector_types import (
     ACLReference,
     SourceContainer,
@@ -38,9 +38,6 @@ ISSUE_TYPE_TO_KIND = {
     "Sub-task": "SUBTASK",
 }
 
-_MENTION_PATTERN = re.compile(r"AB#(\d+)")
-_PR_MENTION_PATTERN = re.compile(r"\bPR-(\d+)\b")
-_GITHUB_CROSS_REPO_REF_PATTERN = re.compile(r"\b([\w.-]+/[\w.-]+)#(\d+)\b")
 
 # Jira's own issue-link relationship types (`fields.issuelinks[].type.name`)
 # — real, human-curated cross-references from Jira's own linking feature,
@@ -144,22 +141,15 @@ def map_comment_content(native_id: str, raw_comment: dict[str, Any]) -> SourceCo
     )
 
 
-def _links_from_text(native_id: str, text: str) -> list[SourceLink]:
-    links = [
-        SourceLink(from_native_id=native_id, target_ref=f"AB#{m.group(1)}", link_kind="mentions")
-        for m in _MENTION_PATTERN.finditer(text)
-    ]
-    links += [
-        SourceLink(from_native_id=native_id, target_ref=f"PR-{m.group(1)}", link_kind="mentions")
-        for m in _PR_MENTION_PATTERN.finditer(text)
-    ]
-    links += [
-        SourceLink(
-            from_native_id=native_id, target_ref=f"{m.group(1)}#{m.group(2)}", link_kind="mentions"
-        )
-        for m in _GITHUB_CROSS_REPO_REF_PATTERN.finditer(text)
-    ]
-    return links
+def _links_from_text(
+    native_id: str, text: str, *, location: str = "description"
+) -> list[SourceLink]:
+    """Shared patterns (connectors/cross_references.py) — this connector
+    previously recognized only AB#, PR- and GitHub refs, so a Confluence
+    page link in an issue description was invisible."""
+    return extract_cross_references(
+        native_id, text, location=location, skip_ref=lambda ref: ref == native_id
+    )
 
 
 def map_links(raw_issue: dict[str, Any]) -> list[SourceLink]:
@@ -184,7 +174,7 @@ def map_links(raw_issue: dict[str, Any]) -> list[SourceLink]:
 
 def map_comment_links(raw_comment: dict[str, Any], issue_key: str) -> list[SourceLink]:
     native_id = f"COMMENT-{raw_comment['id']}"
-    return _links_from_text(native_id, raw_comment.get("body_text", "") or "")
+    return _links_from_text(native_id, raw_comment.get("body_text", "") or "", location="comment")
 
 
 def map_acl(raw: dict[str, Any]) -> ACLReference:

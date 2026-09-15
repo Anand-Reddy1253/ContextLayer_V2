@@ -9,15 +9,41 @@ connector-config UI and a real Azure DevOps live connection.
 
 from __future__ import annotations
 
+import asyncio
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+
+import structlog
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from context_fabric.api.routes import catalog, connectors, context_spaces, org
 from context_fabric.settings import Settings
+from context_fabric.synchronization import scheduler
 
 settings = Settings()
+logger = structlog.get_logger()
 
-app = FastAPI(title="Context Fabric API")
+
+@asynccontextmanager
+async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
+    task: asyncio.Task[None] | None = None
+    if settings.CF_SYNC_INTERVAL_SECONDS > 0:
+        task = asyncio.create_task(scheduler.run_forever(settings.CF_SYNC_INTERVAL_SECONDS))
+    else:
+        logger.info("scheduler.disabled", reason="CF_SYNC_INTERVAL_SECONDS=0")
+    try:
+        yield
+    finally:
+        if task is not None:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+
+app = FastAPI(title="Context Fabric API", lifespan=_lifespan)
 
 app.add_middleware(
     CORSMiddleware,
