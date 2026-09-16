@@ -1,8 +1,12 @@
 """Confluence fixture-mode connector.
 
 Reads fixtures/confluence/*.json — no network, no credentials. Native
-hierarchy: Space -> Page -> child Page, with Attachments and Comments as
-leaves parented by the page they belong to (docs/CONNECTORS.md).
+hierarchy: Space -> Page -> child Page, with Attachments, Comments,
+PERSON (authors/commenters), and LABEL nodes as leaves parented by the
+page they belong to (docs/CONNECTORS.md). Always emits every entity type
+— unlike live.py, fixture mode has no per-connection entity_types config
+to gate on, and fixture data is small enough that there's no cost reason
+to.
 
 Known simplification: get_changes returns an always-empty page — unlike
 ADO's Recycle Bin or GitHub's absent delta feed, there's no fixture data
@@ -45,6 +49,20 @@ class ConfluenceFixtureConnector(FixtureConnectorBase):
 
         self._space_ids = {str(s["id"]) for s in self._spaces_raw}
         self._page_ids = {str(p["id"]) for p in self._pages_raw}
+        # account_id -> display name, from the pages/comments fixture data
+        # itself (fixture mode has no live user-lookup call to make).
+        self._display_names: dict[str, str] = {
+            **{
+                p["authorId"]: p.get("authorName", p["authorId"])
+                for p in self._pages_raw
+                if p.get("authorId")
+            },
+            **{
+                c["author"]: c.get("authorName", c["author"])
+                for c in self._comments_raw
+                if c.get("author")
+            },
+        }
 
     # -- discovery / hierarchy ------------------------------------------
 
@@ -55,27 +73,95 @@ class ConfluenceFixtureConnector(FixtureConnectorBase):
         return self._paginate(self._children_of(parent_id), cursor)
 
     def _children_of(self, parent_id: str) -> list[SourceObject]:
+        # Ordering matters, not just presence: synchronization/
+        # orchestrator.py upserts each item in list_children's own
+        # returned order and calls get_links() on it *immediately* —
+        # before ever calling list_children on that item itself. A page's
+        # AUTHORED_BY/HAS_LABEL edges (emitted from the page's own
+        # get_links()) can only resolve if the PERSON/LABEL node they
+        # target was already upserted earlier in the *same* items list —
+        # which means those dependency nodes must be emitted as this
+        # page's *siblings*, before it, in whichever list_children call
+        # first introduces the page. (A real bug this shape guards
+        # against: LABEL used to be emitted as the page's own *child*,
+        # discovered a full BFS level later than the page's own
+        # get_links() call — which could never resolve, ever, on a fresh
+        # sync.)
         if parent_id in self._space_ids:
-            return [
-                mapper.map_page(p)
+            top_pages = [
+                p
                 for p in self._pages_raw
                 if not p.get("parentId") and str(p["spaceId"]) == parent_id
             ]
+            items: list[SourceObject] = []
+            seen_authors: set[str] = set()
+            for p in self._pages_raw:
+                if str(p["spaceId"]) != parent_id:
+                    continue
+                account_id = p.get("authorId")
+                if account_id and account_id not in seen_authors:
+                    seen_authors.add(account_id)
+                    items.append(
+                        mapper.map_person(
+                            account_id,
+                            self._display_names.get(account_id),
+                            parent_native_id=parent_id,
+                        )
+                    )
+            seen_labels: set[str] = set()
+            for p in top_pages:
+                for name in p.get("labels", []) or []:
+                    if name not in seen_labels:
+                        seen_labels.add(name)
+                        items.append(mapper.map_label(name, parent_native_id=parent_id))
+            items += [mapper.map_page(p) for p in top_pages]
+            return items
         if parent_id in self._page_ids:
-            children = [
-                mapper.map_page(p)
+            child_pages = [
+                p
                 for p in self._pages_raw
                 if str(p.get("parentId") or "") == parent_id
             ]
-            children += [
+            items = []
+            seen_authors = set()
+            for p in child_pages:
+                account_id = p.get("authorId")
+                if account_id and account_id not in seen_authors:
+                    seen_authors.add(account_id)
+                    items.append(
+                        mapper.map_person(
+                            account_id,
+                            self._display_names.get(account_id),
+                            parent_native_id=parent_id,
+                        )
+                    )
+            seen_labels = set()
+            for p in child_pages:
+                for name in p.get("labels", []) or []:
+                    if name not in seen_labels:
+                        seen_labels.add(name)
+                        items.append(mapper.map_label(name, parent_native_id=parent_id))
+            items += [mapper.map_page(p) for p in child_pages]
+            items += [
                 mapper.map_attachment(a)
                 for a in self._attachments_raw
                 if str(a["pageId"]) == parent_id
             ]
-            children += [
-                mapper.map_comment(c) for c in self._comments_raw if str(c["pageId"]) == parent_id
-            ]
-            return children
+            page_comments = [c for c in self._comments_raw if str(c["pageId"]) == parent_id]
+            seen_comment_authors: set[str] = set()
+            for c in page_comments:
+                account_id = c.get("author")
+                if account_id and account_id not in seen_comment_authors:
+                    seen_comment_authors.add(account_id)
+                    items.append(
+                        mapper.map_person(
+                            account_id,
+                            self._display_names.get(account_id),
+                            parent_native_id=parent_id,
+                        )
+                    )
+            items += [mapper.map_comment(c) for c in page_comments]
+            return items
         return []
 
     @staticmethod
@@ -119,10 +205,23 @@ class ConfluenceFixtureConnector(FixtureConnectorBase):
     async def get_links(self, native_id: str) -> list[SourceLink]:
         for p in self._pages_raw:
             if str(p["id"]) == native_id:
-                return mapper.map_links_from_text(native_id, p.get("body", ""))
+                links = mapper.extract_structured_links(native_id, p.get("body", ""))
+                links += mapper.map_page_relationship_links(
+                    native_id,
+                    space_native_id=str(p["spaceId"]),
+                    author_account_id=p.get("authorId"),
+                    label_names=p.get("labels", []),
+                )
+                return links
         for c in self._comments_raw:
             if f"COMMENT-{c['id']}" == native_id:
-                return mapper.map_links_from_text(native_id, c.get("body", ""))
+                links = mapper.extract_structured_links(
+                    native_id, c.get("body", ""), location="comment"
+                )
+                links += mapper.map_comment_relationship_links(
+                    native_id, author_account_id=c.get("author")
+                )
+                return links
         return []
 
     async def get_acl_reference(self, native_id: str) -> ACLReference:

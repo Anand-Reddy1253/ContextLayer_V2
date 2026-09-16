@@ -172,6 +172,7 @@ class AzureDevOpsLiveConnector(LiveConnectorBase):
         "pipelines": f"Pipelines + Runs (status only, last {_RUN_HISTORY_RETENTION_DAYS} days)",
         "environments": "Environments",
         "test_runs": f"Test Runs (aggregate pass/fail only, last {_RUN_HISTORY_RETENTION_DAYS} days)",
+        "ai_assets": "AI Explorer (agents/skills/rules under .github, .claude, .cursor)",
     }
 
     # Which node kinds each entity type produces — synchronization/
@@ -201,6 +202,7 @@ class AzureDevOpsLiveConnector(LiveConnectorBase):
         "pipelines": {"PIPELINE"},
         "environments": {"ENVIRONMENT"},
         "test_runs": {"TEST_RUN"},
+        "ai_assets": {"AI_ASSET"},
     }
 
     def __init__(
@@ -233,6 +235,7 @@ class AzureDevOpsLiveConnector(LiveConnectorBase):
         self._fetched_work_items_for_project: set[str] = set()
         self._repos_by_project: dict[str, list[dict[str, Any]]] = {}
         self._repo_by_id: dict[str, dict[str, Any]] = {}
+        self._ai_assets_by_repo: dict[str, list[dict[str, Any]]] = {}
         self._pull_requests_by_repo: dict[str, list[dict[str, Any]]] = {}
         self._pull_request_by_native_id: dict[str, dict[str, Any]] = {}
         self._wikis_by_project: dict[str, list[dict[str, Any]]] = {}
@@ -352,6 +355,81 @@ class AzureDevOpsLiveConnector(LiveConnectorBase):
             for pr in prs:
                 self._pull_request_by_native_id[f"PR-{pr['pullRequestId']}"] = pr
         return self._pull_requests_by_repo[repo_id]
+
+    async def _ensure_ai_assets(self, repo_id: str) -> list[dict[str, Any]]:
+        """AI Explorer entries — mirrors GitHubLiveConnector._ensure_ai_assets,
+        using ADO's Git Items API (a single recursive tree listing, then a
+        per-file content fetch for whatever classifies as an AI asset)
+        instead of GitHub's git-trees + contents API. Its own lightweight
+        fetch, not reused from anywhere else in this connector — no other
+        entity type needs a full repo tree listing, and ADO repos are
+        never crawled for raw code content here (same scope limit as
+        map_git_repository's own docstring)."""
+        if repo_id in self._ai_assets_by_repo:
+            return self._ai_assets_by_repo[repo_id]
+
+        repo = self._repo_by_id.get(repo_id)
+        project = (
+            repo["project"]["name"]
+            if repo is not None and isinstance(repo.get("project"), dict)
+            else ""
+        )
+        try:
+            tree_data = await self._request(
+                "GET",
+                f"/{project}/_apis/git/repositories/{repo_id}/items",
+                params={"recursionLevel": "Full", "api-version": self._api_version},
+            )
+        except (AuthError, NotFound, Permanent) as exc:
+            logger.warning("azure_devops.ai_assets_unavailable", repo=repo_id, error=str(exc))
+            self._mark_degraded("ai_assets", str(exc))
+            self._ai_assets_by_repo[repo_id] = []
+            return []
+
+        assets: list[dict[str, Any]] = []
+        for entry in tree_data.get("value", []):
+            if entry.get("isFolder"):
+                continue
+            # ADO item paths are rooted ("/.github/agents/reviewer.md") —
+            # classify_ai_asset_path expects the same unrooted shape
+            # GitHub's tree API already returns.
+            path = entry["path"].lstrip("/")
+            classified = mapper.classify_ai_asset_path(path)
+            if classified is None:
+                continue
+            vendor, asset_type = classified
+            try:
+                content_data = await self._request(
+                    "GET",
+                    f"/{project}/_apis/git/repositories/{repo_id}/items",
+                    params={
+                        "path": entry["path"],
+                        "includeContent": "true",
+                        "api-version": self._api_version,
+                    },
+                )
+            except (AuthError, NotFound, Permanent) as exc:
+                logger.warning(
+                    "azure_devops.ai_asset_content_unavailable",
+                    repo=repo_id,
+                    path=path,
+                    error=str(exc),
+                )
+                continue
+            text = content_data.get("content", "")
+            fallback_name = path.rsplit("/", 1)[-1].rsplit(".", 1)[0]
+            name, description = mapper.parse_ai_asset_description(text, fallback_name=fallback_name)
+            assets.append(
+                {
+                    "path": path,
+                    "vendor": vendor,
+                    "asset_type": asset_type,
+                    "name": name,
+                    "description": description,
+                }
+            )
+        self._ai_assets_by_repo[repo_id] = assets
+        return assets
 
     async def _ensure_wikis(self, project: str) -> list[dict[str, Any]]:
         if project not in self._wikis_by_project:
@@ -594,10 +672,24 @@ class AzureDevOpsLiveConnector(LiveConnectorBase):
             return Page(items=items, next_cursor=None)
 
         if parent_id in self._repo_by_id:
-            if "pull_requests" not in self._entity_types:
-                return Page(items=[], next_cursor=None)
-            prs = await self._ensure_pull_requests(parent_id)
-            return Page(items=[mapper.map_pull_request(pr) for pr in prs], next_cursor=None)
+            items = []
+            if "pull_requests" in self._entity_types:
+                prs = await self._ensure_pull_requests(parent_id)
+                items += [mapper.map_pull_request(pr) for pr in prs]
+            if "ai_assets" in self._entity_types:
+                assets = await self._ensure_ai_assets(parent_id)
+                items += [
+                    mapper.map_ai_asset(
+                        parent_id,
+                        a["path"],
+                        vendor=a["vendor"],
+                        asset_type=a["asset_type"],
+                        name=a["name"],
+                        description=a["description"],
+                    )
+                    for a in assets
+                ]
+            return Page(items=items, next_cursor=None)
 
         if parent_id in self._pipeline_project_by_native_id:
             if "builds" not in self._entity_types:
@@ -694,6 +786,36 @@ class AzureDevOpsLiveConnector(LiveConnectorBase):
             )
             return mapper.map_wiki_page_content(
                 native_id, {"content": data.get("content", ""), "url": page.get("url", "")}
+            )
+
+        # AI assets (agent/skill/rule definitions) — same on-demand fetch
+        # as GitHubLiveConnector.get_content's ai_asset branch: a caller
+        # discovers "this repo has a reviewer agent" through the catalog,
+        # then fetches the definition here. Repo id is a GUID, so
+        # `native_id` alone doesn't say which project it's under — looked
+        # up via `_repo_by_id`, populated whenever `_ensure_repos` (or
+        # `_ensure_ai_assets`, itself dependent on it) has already run for
+        # this connection, which sync always does before content fetches.
+        ai_asset = mapper.parse_ai_asset_ref(native_id)
+        if ai_asset is not None:
+            repo_id, asset_path = ai_asset
+            repo = self._repo_by_id.get(repo_id)
+            project = (
+                repo["project"]["name"]
+                if repo is not None and isinstance(repo.get("project"), dict)
+                else ""
+            )
+            data = await self._request(
+                "GET",
+                f"/{project}/_apis/git/repositories/{repo_id}/items",
+                params={
+                    "path": f"/{asset_path}",
+                    "includeContent": "true",
+                    "api-version": self._api_version,
+                },
+            )
+            return mapper.map_wiki_page_content(
+                native_id, {"content": data.get("content", ""), "url": data.get("url", "")}
             )
 
         if native_id not in self._work_items_raw_by_id:

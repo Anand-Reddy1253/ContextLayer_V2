@@ -17,15 +17,20 @@ depends_on: Sequence[str] | str | None = None
 
 
 def upgrade() -> None:
+    is_sqlite = op.get_bind().dialect.name == "sqlite"
+    ts_type = "TEXT" if is_sqlite else "TIMESTAMPTZ"
+    ts_default = "DEFAULT CURRENT_TIMESTAMP" if is_sqlite else "DEFAULT now()"
+    id_type = "TEXT PRIMARY KEY" if is_sqlite else "UUID PRIMARY KEY DEFAULT gen_random_uuid()"
+
     op.execute(
-        """
+        f"""
         CREATE TABLE sync_state (
             source_system         TEXT NOT NULL,
             scope_id               TEXT NOT NULL,
             cursor                  TEXT NULL,
             last_event_id           TEXT NULL,
-            last_successful_sync    TIMESTAMPTZ NULL,
-            last_reconciliation     TIMESTAMPTZ NULL,
+            last_successful_sync    {ts_type} NULL,
+            last_reconciliation     {ts_type} NULL,
             status                   TEXT NOT NULL DEFAULT 'PENDING',
             error                    TEXT NULL,
             PRIMARY KEY (source_system, scope_id)
@@ -33,18 +38,18 @@ def upgrade() -> None:
         """
     )
     op.execute(
-        """
+        f"""
         CREATE TABLE sync_run (
-            id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            id                {id_type},
             source_system     TEXT NOT NULL,
             scope_id          TEXT NOT NULL,
             correlation_id    TEXT NOT NULL,
-            started_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
-            finished_at       TIMESTAMPTZ NULL,
+            started_at        {ts_type} NOT NULL {ts_default},
+            finished_at       {ts_type} NULL,
             status            TEXT NOT NULL DEFAULT 'RUNNING',
-            nodes_upserted    INT NOT NULL DEFAULT 0,
-            nodes_tombstoned  INT NOT NULL DEFAULT 0,
-            edges_created     INT NOT NULL DEFAULT 0,
+            nodes_upserted    INTEGER NOT NULL DEFAULT 0,
+            nodes_tombstoned  INTEGER NOT NULL DEFAULT 0,
+            edges_created     INTEGER NOT NULL DEFAULT 0,
             error_category    TEXT NULL,
             error_detail      TEXT NULL
         )

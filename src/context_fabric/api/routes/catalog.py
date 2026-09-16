@@ -109,10 +109,16 @@ def _edge_json(edge: Any) -> dict[str, Any]:
         "state": edge.state.value,
         "confidence": edge.confidence,
         "evidence": (edge.attributes or {}).get("evidence"),
+        # Full attributes, not just the deterministic-edge "evidence"
+        # string above — LLM-inferred edges (ADR-011) carry
+        # extracted_by/model/rationale here instead, and have no
+        # "evidence" key at all (ProposedLinksPage.tsx reads this to show
+        # the model's own stated rationale in the review queue).
+        "attributes": edge.attributes or {},
     }
 
 
-def _native_call_json(node: Any) -> dict[str, Any] | None:
+def native_call_json(node: Any) -> dict[str, Any] | None:
     """The exact tool name + params a *native* per-vendor MCP server would
     need to fetch this object directly — distinct from `url`, which is
     for a human. Researched against each vendor's real, current MCP
@@ -132,14 +138,42 @@ def _native_call_json(node: Any) -> dict[str, Any] | None:
     url = attrs.get("url") or ""
 
     if system == "azure_devops":
-        segments = urlsplit(url).path.strip("/").split("/")
-        project = segments[0] if segments and segments[0] else None
-        if project is None or native_id is None:
-            return None
-        return {
-            "tool": "wit_get_work_items_batch",
-            "params": {"project": project, "ids": [native_id]},
-        }
+        # `wit_get_work_items_batch` is a work-item-only tool — gated on
+        # native_id being the bare-numeric work-item id shape every
+        # WORK_ITEM_TYPE_TO_KIND kind shares (map_work_item's
+        # native_id=raw["id"]), not on kind directly (enumerating every
+        # work-item kind here would be one more list to keep in sync).
+        # Without this, any other azure_devops kind with a `url` attribute
+        # (AI_ASSET, GIT_REPOSITORY, a wiki page, a build) fell through to
+        # this branch and got a fabricated, wrong work-item-batch call —
+        # a real bug, caught once workflow-template steps started
+        # resolving locators for AI_ASSET nodes. No confirmed real ADO MCP
+        # tool for fetching a repo file's content exists in
+        # docs/BENCHMARK.md yet, so those kinds correctly fall through to
+        # `return None` below rather than guessing one.
+        if native_id is not None and native_id.isdigit():
+            segments = urlsplit(url).path.strip("/").split("/")
+            project = segments[0] if segments and segments[0] else None
+            if project is not None:
+                return {
+                    "tool": "wit_get_work_items_batch",
+                    "params": {"project": project, "ids": [native_id]},
+                }
+        return None
+
+    if system == "github" and kind == "AI_ASSET" and native_id is not None:
+        # AI_ASSET native_id is "{owner/repo}:ai-asset:{path}"
+        # (connectors/ai_assets.py's marker scheme) — no branch/ref
+        # embedded (always the repo's default branch), unlike FILE/
+        # DIRECTORY below, so `ref` is omitted rather than guessed.
+        repo, marker, path = native_id.partition(":ai-asset:")
+        owner, _, name = repo.partition("/")
+        if marker:
+            return {
+                "tool": "get_file_contents",
+                "params": {"owner": owner, "repo": name, "path": path},
+            }
+        return None
 
     if system == "github" and native_id is not None:
         if kind == "PULL_REQUEST":
@@ -187,7 +221,7 @@ def _native_call_json(node: Any) -> dict[str, Any] | None:
     return None
 
 
-def _locator_json(node: Any, *, include_native_call: bool = True) -> dict[str, Any]:
+def locator_json(node: Any, *, include_native_call: bool = True) -> dict[str, Any]:
     """Everything a caller needs to identify and fetch this exact object
     from its native source, independent of Context Fabric's own id
     (docs/UI.md "Search") — a downstream agent handing this off to a
@@ -215,7 +249,7 @@ def _locator_json(node: Any, *, include_native_call: bool = True) -> dict[str, A
         "native_id": node.native_id,
         "kind": node.kind,
         "url": (node.attributes or {}).get("url"),
-        "native_call": _native_call_json(node) if include_native_call else None,
+        "native_call": native_call_json(node) if include_native_call else None,
     }
 
 
@@ -359,16 +393,24 @@ async def delete_edge(edge_id: UUID, session: AsyncSession = Depends(get_session
 
 @router.get("/edges/proposed")
 async def list_proposed_edges(
-    type: str | None = None, session: AsyncSession = Depends(get_session)
+    type: str | None = None,
+    limit: int = 500,
+    session: AsyncSession = Depends(get_session),
 ) -> list[dict[str, Any]]:
     """The review queue documented in docs/UI.md "Proposed links review
     queue" — every `state=PROPOSED` edge (produced today by
     synchronization/link_extraction.py's regex-based extraction), each
     with its src/dst node summaries resolved so the UI never has to make
     a second round trip per row. `type` optionally narrows to a
-    comma-separated list of EdgeType values (e.g. "RELATED_TO,MENTIONS")."""
+    comma-separated list of EdgeType values (e.g. "RELATED_TO,MENTIONS").
+    `limit` defaults higher than EdgeRepository.list_by_state's own
+    default (200) — a "select all" bulk action needs the true full set,
+    not a silently truncated page, and 200 was already close to a real
+    org's actual queue depth (181 at last count)."""
     edge_types = type.split(",") if type else None
-    edges = await EdgeRepository(session).list_by_state("PROPOSED", edge_types=edge_types)
+    edges = await EdgeRepository(session).list_by_state(
+        "PROPOSED", edge_types=edge_types, limit=limit
+    )
     node_repo = NodeRepository(session)
     result = []
     for edge in edges:
@@ -382,6 +424,39 @@ async def list_proposed_edges(
             }
         )
     return result
+
+
+class BulkEdgeIdsRequest(BaseModel):
+    edge_ids: list[UUID]
+
+
+@router.post("/edges/bulk-confirm")
+async def bulk_confirm_proposed_edges(
+    body: BulkEdgeIdsRequest, session: AsyncSession = Depends(get_session)
+) -> dict[str, Any]:
+    """Same transition as confirm_proposed_edge, applied to many edges at
+    once — the review queue's bulk-select action. Silently skips any id
+    that's already gone/handled rather than failing the whole batch (see
+    EdgeRepository.set_state_bulk)."""
+    edge_repo = EdgeRepository(session)
+    updated = await edge_repo.set_state_bulk(
+        body.edge_ids, EdgeState.ACTIVE.value, datetime.now(UTC)
+    )
+    return {"confirmed": len(updated), "edges": [_edge_json(e) for e in updated]}
+
+
+@router.post("/edges/bulk-reject")
+async def bulk_reject_proposed_edges(
+    body: BulkEdgeIdsRequest, session: AsyncSession = Depends(get_session)
+) -> dict[str, Any]:
+    """Same transition as reject_proposed_edge, applied to many edges at
+    once — see bulk_confirm_proposed_edges and
+    EdgeRepository.set_state_bulk."""
+    edge_repo = EdgeRepository(session)
+    updated = await edge_repo.set_state_bulk(
+        body.edge_ids, EdgeState.REJECTED.value, datetime.now(UTC)
+    )
+    return {"rejected": len(updated), "edges": [_edge_json(e) for e in updated]}
 
 
 @router.post("/edges/{edge_id}/confirm")
@@ -444,19 +519,49 @@ async def retype_proposed_edge(
 async def get_node_graph(
     node_id: UUID, session: AsyncSession = Depends(get_session)
 ) -> dict[str, Any]:
-    """The full subgraph rooted at this node — every descendant plus
-    every edge (structural and extracted) among them — for the "complete
-    graph" view on a top-level container (docs/UI.md "Catalog Explorer").
-    An edge to something outside this subtree never appears, so the
-    rendered graph is always self-contained."""
+    """Every descendant of this node, every structural/extracted edge
+    among them, *and* every node on the other end of a real cross-
+    reference out of that subtree — e.g. a GitHub PR whose title mentions
+    an Azure Boards work item nested somewhere under this one (docs/UI.md
+    "Catalog Explorer"). That last part used to be silently excluded: a
+    cross-vendor edge's target sits in a different source's own path
+    tree entirely, so a plain "edges among this subtree" query can never
+    surface it — real user report: the "full graph" showed the tree but
+    never a cross-vendor link, even when one genuinely existed. Fetching
+    edges *touching* the subtree (not just *within* it) and pulling in
+    whatever external node is at the other end fixes that; those external
+    nodes are added standalone (their own subtrees aren't expanded), so
+    this stays one hop out, not an unbounded crawl of the whole graph."""
     node_repo = NodeRepository(session)
     node = await node_repo.get(node_id)
     if node is None:
         raise HTTPException(404, "node not found")
-    nodes = await node_repo.list_descendants(node.path, include_self=True)
-    node_ids = [n.id for n in nodes]
-    edges = await EdgeRepository(session).list_among(node_ids)
-    return {"nodes": [_node_json(n) for n in nodes], "edges": [_edge_json(e) for e in edges]}
+    edge_repo = EdgeRepository(session)
+
+    subtree_nodes = await node_repo.list_descendants(node.path, include_self=True)
+    subtree_ids = {n.id for n in subtree_nodes}
+
+    structural_edges = await edge_repo.list_among(list(subtree_ids))
+    cross_edges = await edge_repo.list_touching_any(list(subtree_ids), exclude_types=["CONTAINS"])
+    edges_by_id = {e.id: e for e in [*structural_edges, *cross_edges]}
+
+    external_ids = {
+        other_id
+        for e in cross_edges
+        for other_id in (e.src_id, e.dst_id)
+        if other_id not in subtree_ids
+    }
+    external_nodes = []
+    for other_id in external_ids:
+        other = await node_repo.get(other_id)
+        if other is not None:
+            external_nodes.append(other)
+
+    all_nodes = [*subtree_nodes, *external_nodes]
+    return {
+        "nodes": [_node_json(n) for n in all_nodes],
+        "edges": [_edge_json(e) for e in edges_by_id.values()],
+    }
 
 
 async def _build_enterprise_graph_data(
@@ -918,7 +1023,10 @@ async def _semantic_ranking(
     stmt = select(NodeORM).where(
         NodeORM.layer == Layer.TECHNICAL.value,
         NodeORM.deleted_at.is_(None),
-        NodeORM.attributes.has_key("embedding"),
+        # Not `.has_key()` — Postgres-JSONB-only. `[key].is_not(None)` is
+        # SQLAlchemy's generic, dialect-portable existence check (verified
+        # to compile correctly on both Postgres and SQLite).
+        NodeORM.attributes["embedding"].is_not(None),
     )
     if sources:
         stmt = stmt.where(NodeORM.source_system.in_(sources))
@@ -1035,8 +1143,11 @@ async def search_cards(
         NodeORM.name,
         NodeORM.description,
         NodeORM.native_id,
-        NodeORM.attributes["llm_abstract"].astext,
-        NodeORM.attributes["llm_keywords"].astext,
+        # Not `.astext` — Postgres-JSONB-only. `.as_string()` is the
+        # dialect-portable equivalent (verified to compile correctly on
+        # both Postgres and SQLite).
+        NodeORM.attributes["llm_abstract"].as_string(),
+        NodeORM.attributes["llm_keywords"].as_string(),
     )
     whole_phrase_match = or_(*(f.ilike(f"%{q_text}%") for f in fields))
     # Every word present somewhere (any field, any order) — otherwise
@@ -1046,6 +1157,8 @@ async def search_cards(
     # _score_match's own multi-term fallback tier below.
     terms = q_text.lower().split()
 
+    dialect_name = session.get_bind().dialect.name
+
     def _term_match(term: str):
         # pg_trgm's "%" similarity operator — index-accelerated by the
         # same ix_node_name_trgm GIN index migration 0014 already built —
@@ -1053,12 +1166,16 @@ async def search_cards(
         # would. Only on name/native_id: those are short, single-concept
         # fields where trigram similarity is meaningful; description/
         # abstract text is long enough that whole-field similarity
-        # against one word is noise, not signal.
-        return or_(
-            *(f.ilike(f"%{term}%") for f in fields),
-            NodeORM.name.op("%")(term),
-            NodeORM.native_id.op("%")(term),
-        )
+        # against one word is noise, not signal. Postgres-only — no
+        # pg_trgm on SQLite (would need an FTS5 rewrite, declined for
+        # now, see ADR-010's dual-backend amendment): the SQL-side
+        # candidate set is narrower there, though _score_match's Python
+        # SequenceMatcher fuzzy tier still runs over whatever ILIKE did
+        # fetch.
+        clauses = [f.ilike(f"%{term}%") for f in fields]
+        if dialect_name != "sqlite":
+            clauses += [NodeORM.name.op("%")(term), NodeORM.native_id.op("%")(term)]
+        return or_(*clauses)
 
     multi_term_match = and_(*(_term_match(t) for t in terms)) if len(terms) > 1 else None
     fuzzy_match = _term_match(q_text) if len(terms) == 1 else None
@@ -1134,19 +1251,19 @@ async def search_cards(
                     "edge": _edge_json(e),
                     "direction": "outgoing" if e.src_id == node.id else "incoming",
                     "node": _node_json(other, include_attributes=False),
-                    "locator": _locator_json(other),
+                    "locator": locator_json(other),
                 }
             )
 
         cards.append(
             {
                 "node": _node_json(node),
-                "locator": _locator_json(node),
+                "locator": locator_json(node),
                 "score": score_by_id.get(node.id, 0.0),
                 "ancestors": [
                     {
                         "node": _node_json(a, include_attributes=False),
-                        "locator": _locator_json(a, include_native_call=False),
+                        "locator": locator_json(a, include_native_call=False),
                     }
                     for a in ancestors
                     if a.id != node.id
@@ -1370,7 +1487,7 @@ async def search_entities(
     """
     try:
         relations = await resolve_relations(session, request.query)
-        predicate = compile_group(request.query, relations)
+        predicate = compile_group(request.query, relations, session.get_bind().dialect.name)
     except QueryError as exc:
         raise HTTPException(400, str(exc)) from exc
 
@@ -1382,7 +1499,7 @@ async def search_entities(
         # ISO 8601 strings sort correctly as plain text; nulls_last so a
         # node with no timestamp doesn't win by sorting NULL-first, SQL's
         # default for DESC.
-        .order_by(NodeORM.attributes["updated_at"].astext.desc().nulls_last())
+        .order_by(NodeORM.attributes["updated_at"].as_string().desc().nulls_last())
         .limit(request.limit)
     )
     anchors = list((await session.execute(stmt)).scalars().all())
@@ -1469,7 +1586,7 @@ async def aggregate_entities(
 
     try:
         relations = await resolve_relations(session, request.query)
-        predicate = compile_group(request.query, relations)
+        predicate = compile_group(request.query, relations, session.get_bind().dialect.name)
         group_cols = [_column_for(p) for p in request.group_by]
         metric_cols = compile_metrics(request.metrics)
     except QueryError as exc:

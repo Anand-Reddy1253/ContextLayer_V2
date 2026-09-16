@@ -1,13 +1,19 @@
 """Context MCP — stdio transport (docs/MCP.md).
 
-First real slice of the design in docs/MCP.md, not the full four-tool
-spec. The full design (`resolve_scope`, `get_context_pack`,
-`expand_evidence`, `refresh_evidence`) depends on infrastructure that
-doesn't exist yet — `configs/stage-contracts.yaml`, task_ref-based scope
-inference, an evidence cache with token-budget enforcement. Building
-against that before it exists would mean either stubbing those pieces
-(fake data, exactly what this session has spent its effort *removing*
-from the demo) or blocking on a much larger build.
+Not the full four-tool spec yet. `resolve_scope` is real (this file
+registers it, `retrieval/scope.py` implements it), and so is the
+harness-composition pair `list_workflow_templates`/`get_workflow_template`
+(`catalog/workflow_templates.py` + `persistence/repositories/
+workflow_template.py`) — the natural flow being `resolve_scope(task_ref)`
+-> `list_workflow_templates(context_space_id)` -> `get_workflow_template(id)`,
+handing a harness a fully-locator-resolved, ordered pipeline of steps to
+execute. The remaining two, `get_context_pack` and
+`expand_evidence`/`refresh_evidence`, still depend on infrastructure that
+doesn't exist yet — `configs/stage-contracts.yaml`, an evidence cache with
+token-budget enforcement. Building against that before it exists would mean
+either stubbing those pieces (fake data, exactly what this session has
+spent its effort *removing* from the demo) or blocking on a much larger
+build.
 
 What's real and already tested is `catalog.search_cards` — the same
 logic backing `GET /api/catalog/search-cards`, verified this session
@@ -45,6 +51,81 @@ mcp = MCPServer("context-fabric")
 # same ones (docs/MCP.md). The decorator reads the signature and docstring at
 # registration time — those *are* the schema and description the model sees, so
 # they belong here rather than being copied across afterwards.
+@mcp.tool()
+async def resolve_scope(
+    task_ref: str, actor_id: str, context_space_override: str | None = None
+) -> str:
+    """Which repo/team/product a task belongs to (docs/RETRIEVAL.md §1).
+
+    Deterministic and model-call-free: given a task_ref (e.g. "AB#312", a
+    Jira key like "TALENT-42", "owner/repo#42", or "CONFPAGE-98765"), finds
+    the already-synced node it names, walks context-space bindings for the
+    one whose boundary contains it, and returns that scope — product,
+    teams, services, and `repositories` (what a harness should clone).
+
+    This tool never executes anything — it only tells a harness what's
+    there and where. Once scope is resolved, query for what's available to
+    run in that scope with search_entities (e.g. {"$blueprint": "AI_ASSET",
+    "$path": "beginsWith <a repository's path>"}) and fetch the full
+    agent/skill definition via that connector's own on-demand content
+    locator.
+
+    A task_ref that can't be parsed, was never synced, or has no covering
+    context-space binding comes back as resolved: false with a reason —
+    never an exception, never a silent empty success.
+
+    Args:
+        task_ref: e.g. "AB#312", "TALENT-42", "acme-org/repo#7", "CONFPAGE-123".
+        actor_id: identity of the caller (authorization isn't wired in yet).
+        context_space_override: optional, restrict resolution to one
+            already-known context space instead of searching all of them.
+    """
+    return await tools.resolve_scope_tool(task_ref, actor_id, context_space_override)
+
+
+@mcp.tool()
+async def list_workflow_templates(context_space_id: str | None = None) -> str:
+    """Discover workflow templates — a named, ordered pipeline of steps
+    (each a specific agent/skill) a harness pulls and executes in order.
+    Context Fabric only stores and serves templates; it never runs one.
+
+    Lightweight on purpose (no per-step locator resolution — that's what
+    get_workflow_template is for): use this to find a template's id, then
+    fetch the full pipeline with get_workflow_template. The natural
+    harness flow is resolve_scope(task_ref) ->
+    list_workflow_templates(context_space_id) -> get_workflow_template(id).
+
+    Args:
+        context_space_id: optional, restrict to templates authored
+            against one context space (e.g. the one resolve_scope just
+            returned).
+    """
+    return await tools.list_workflow_templates_tool(context_space_id)
+
+
+@mcp.tool()
+async def get_workflow_template(template_id: str) -> str:
+    """Fetch one workflow template's full, ordered pipeline of steps —
+    each step a specific agent/skill picked from the catalog at author
+    time, with a locator resolved fresh (right now, not from the
+    template's own snapshot) so a harness knows exactly how to fetch the
+    step's full definition via that vendor's own MCP server.
+
+    A step whose underlying node no longer resolves (the repo was
+    unsynced, the file was removed) comes back with resolved: false and
+    locator: null rather than a stale or fabricated locator — the
+    template's own display fields (label/vendor/asset_type) still show.
+
+    Context Fabric never executes a step — this tool only tells a harness
+    what the pipeline is and where each step's definition lives.
+
+    Args:
+        template_id: the workflow template's id (from
+            list_workflow_templates or the UI).
+    """
+    return await tools.get_workflow_template_tool(template_id)
+
+
 @mcp.tool()
 async def describe_schema(kind: str | None = None) -> str:
     """What can be queried — kinds, their properties, and relations.

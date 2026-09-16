@@ -7,7 +7,10 @@
     "status": "current",
     "version": 4,
     "body": "<p>Welcome to the Identity squad space. See AB#301 for the SSO epic.</p>",
-    "url": "https://acme.atlassian.net/wiki/spaces/TALENT/pages/131073"
+    "url": "https://acme.atlassian.net/wiki/spaces/TALENT/pages/131073",
+    "authorId": "acc-identity-lead",
+    "authorName": "Identity Squad Lead",
+    "labels": ["home"]
   },
   {
     "id": "131074",
@@ -17,7 +20,10 @@
     "status": "current",
     "version": 2,
     "body": "<p>Design for SSO. References PR-42 and AB#312.</p>",
-    "url": "https://acme.atlassian.net/wiki/spaces/TALENT/pages/131074"
+    "url": "https://acme.atlassian.net/wiki/spaces/TALENT/pages/131074",
+    "authorId": "acc-identity-lead",
+    "authorName": "Identity Squad Lead",
+    "labels": ["design"]
   },
   {
     "id": "131075",
@@ -27,6 +33,22 @@
     "status": "current",
     "version": 1,
     "body": "<p>Platform engineering docs.</p>",
-    "url": "https://acme.atlassian.net/wiki/spaces/PLAT/pages/131075"
+    "url": "https://acme.atlassian.net/wiki/spaces/PLAT/pages/131075",
+    "authorId": "acc-platform-lead",
+    "authorName": "Platform Lead",
+    "labels": ["home"]
+  },
+  {
+    "id": "131076",
+    "spaceId": "98305",
+    "parentId": null,
+    "title": "ADR-014 Move settlement to event sourcing",
+    "status": "current",
+    "version": 1,
+    "body": "<ac:structured-macro ac:name=\"details\"><ac:rich-text-body><table><tbody><tr><th>Status</th><td>Accepted</td></tr><tr><th>Context</th><td>We needed event-driven settlement.</td></tr><tr><th>Decision</th><td>Move to event sourcing.</td></tr><tr><th>Consequences</th><td>Requires new infra.</td></tr></tbody></table></ac:rich-text-body></ac:structured-macro><p>Reviewed by <ac:link><ri:user ri:account-id=\"acc-identity-lead\"/></ac:link>.</p><p>Tracked in <ac:structured-macro ac:name=\"jira\"><ac:parameter ac:name=\"key\">TALENT-9</ac:parameter></ac:structured-macro>.</p><p>See also <ac:link><ri:page ri:content-title=\"Platform Engineering Home\" ri:space-key=\"PLAT\"/></ac:link> for related infra docs.</p><ac:structured-macro ac:name=\"include\"><ac:parameter ac:name=\"page\"><ri:page ri:content-title=\"Platform Engineering Home\" ri:space-key=\"PLAT\"/></ac:parameter></ac:structured-macro>",
+    "url": "https://acme.atlassian.net/wiki/spaces/TALENT/pages/131076",
+    "authorId": "acc-identity-lead",
+    "authorName": "Identity Squad Lead",
+    "labels": ["adr", "decision"]
   }
 ]

@@ -31,7 +31,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 
 from alembic import op
-from sqlalchemy import text
+from sqlalchemy import bindparam, text
 
 from context_fabric.domain.config import load_relationships
 from context_fabric.domain.enums import EdgeType
@@ -58,19 +58,23 @@ _EXTRACTED_TYPES = (
 def upgrade() -> None:
     rules = load_relationships()
     bind = op.get_bind()
+    # Not `= ANY(:types)`/`= ANY(:ids)` — Postgres array-parameter syntax.
+    # `IN :param` with an `expanding=True` bindparam is SQLAlchemy's
+    # dialect-agnostic equivalent (same fix as graph/traversal.py's
+    # recursive edge-type filter).
+    select_stmt = text(
+        """
+        SELECT e.id, e.type, src.kind, dst.kind
+        FROM edge e
+        JOIN node src ON src.id = e.src_id
+        JOIN node dst ON dst.id = e.dst_id
+        WHERE e.deleted_at IS NULL
+          AND e.origin IN ('SYNC_EXTRACTED', 'SYNC_STRUCTURAL')
+          AND e.type IN :types
+        """
+    ).bindparams(bindparam("types", expanding=True))
     rows = bind.execute(
-        text(
-            """
-            SELECT e.id, e.type, src.kind, dst.kind
-            FROM edge e
-            JOIN node src ON src.id = e.src_id
-            JOIN node dst ON dst.id = e.dst_id
-            WHERE e.deleted_at IS NULL
-              AND e.origin IN ('SYNC_EXTRACTED', 'SYNC_STRUCTURAL')
-              AND e.type = ANY(:types)
-            """
-        ),
-        {"types": [t.value for t in _EXTRACTED_TYPES]},
+        select_stmt, {"types": [t.value for t in _EXTRACTED_TYPES]}
     ).fetchall()
 
     to_delete = [
@@ -79,10 +83,10 @@ def upgrade() -> None:
         if not rules.allows(EdgeType(edge_type), src_kind, dst_kind)
     ]
     if to_delete:
-        bind.execute(
-            text("DELETE FROM edge WHERE id = ANY(:ids)"),
-            {"ids": to_delete},
+        delete_stmt = text("DELETE FROM edge WHERE id IN :ids").bindparams(
+            bindparam("ids", expanding=True)
         )
+        bind.execute(delete_stmt, {"ids": to_delete})
     print(f"0017: removed {len(to_delete)} edge(s) violating configs/relationships.yaml")
 
 

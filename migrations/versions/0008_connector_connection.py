@@ -17,18 +17,25 @@ depends_on: Sequence[str] | str | None = None
 
 
 def upgrade() -> None:
+    is_sqlite = op.get_bind().dialect.name == "sqlite"
+    id_type = "TEXT PRIMARY KEY" if is_sqlite else "UUID PRIMARY KEY DEFAULT gen_random_uuid()"
+    json_type = "TEXT" if is_sqlite else "JSONB"
+    blob_type = "BLOB" if is_sqlite else "BYTEA"
+    ts_type = "TEXT" if is_sqlite else "TIMESTAMPTZ"
+    ts_default = "DEFAULT CURRENT_TIMESTAMP" if is_sqlite else "DEFAULT now()"
+
     op.execute(
-        """
+        f"""
         CREATE TABLE connector_connection (
-            id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            id                  {id_type},
             source_system       TEXT NOT NULL,
             instance_id         TEXT NOT NULL,
             display_name        TEXT NOT NULL,
             mode                TEXT NOT NULL DEFAULT 'fixture',
-            config              JSONB NOT NULL DEFAULT '{}',
-            credential_ciphertext BYTEA NULL,
-            created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
-            updated_at          TIMESTAMPTZ NOT NULL DEFAULT now()
+            config              {json_type} NOT NULL DEFAULT '{{}}',
+            credential_ciphertext {blob_type} NULL,
+            created_at          {ts_type} NOT NULL {ts_default},
+            updated_at          {ts_type} NOT NULL {ts_default}
         )
         """
     )

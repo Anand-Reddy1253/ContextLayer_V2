@@ -35,6 +35,22 @@ class EdgeType(StrEnum):
     DEPENDS_ON = "DEPENDS_ON"
     MENTIONS = "MENTIONS"
     RELATED_TO = "RELATED_TO"
+    # Confluence relationship extraction (docs/CONNECTORS.md) — all five
+    # deterministic, vendor-declared or table-parsed, never inferred.
+    IN_SPACE = "IN_SPACE"
+    AUTHORED_BY = "AUTHORED_BY"
+    COMMENTED_ON = "COMMENTED_ON"
+    LINKS_TO = "LINKS_TO"
+    TRANSCLUDES = "TRANSCLUDES"
+    HAS_LABEL = "HAS_LABEL"
+    # LLM-inferred document relationships (ADR-011) — never deterministic,
+    # always origin=LLM_INFERRED, always state=PROPOSED. A document's
+    # relationship to a business service reuses RELATED_TO rather than a
+    # new type here — it isn't a decision relationship.
+    SUPERSEDES = "SUPERSEDES"
+    SUPERSEDED_BY = "SUPERSEDED_BY"
+    CAUSED_BY = "CAUSED_BY"
+    DECIDES_ON = "DECIDES_ON"
 
 
 class EdgeOrigin(StrEnum):
@@ -42,6 +58,10 @@ class EdgeOrigin(StrEnum):
     SYNC_EXTRACTED = "SYNC_EXTRACTED"
     HUMAN = "HUMAN"
     RULE = "RULE"
+    # A model's own guess, never a vendor-declared or pattern-matched fact
+    # (ADR-011) — always paired with state=PROPOSED, never auto-confirmed,
+    # regardless of the model's own reported confidence.
+    LLM_INFERRED = "LLM_INFERRED"
 
 
 class EdgeState(StrEnum):

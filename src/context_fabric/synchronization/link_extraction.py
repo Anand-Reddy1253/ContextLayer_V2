@@ -83,7 +83,22 @@ LINK_PATTERNS: list[LinkPattern] = [
     # syntactically valid 2-letter project key, and pattern order decides
     # which source_system a bare "PR-42" resolves against.
     (re.compile(r"^[A-Z][A-Z0-9]{1,9}-\d+$"), "jira", lambda m: m.group(0)),
+    # Confluence's own SPACE/PERSON/LABEL native_ids — plain technical-
+    # identity lookups (a space id, an account id, a label name), no
+    # different from any other target_ref shape above. Only the
+    # CONFTITLE: shape (below, resolved separately in _resolve_target)
+    # needs anything more than this table.
+    (re.compile(r"^CONFSPACE:(.+)$"), "confluence", lambda m: m.group(1)),
+    (re.compile(r"^CONFUSER:(.+)$"), "confluence", lambda m: m.group(1)),
+    (re.compile(r"^CONFLABEL:(.+)$"), "confluence", lambda m: m.group(1)),
 ]
+
+# CONFTITLE:{space_key}:{title} — a page referenced by title+space-key
+# (Confluence's `ac:link`/`ri:page` macro, when it has no `ri:content-id`)
+# rather than by numeric id. Split out from LINK_PATTERNS above because
+# resolving it is a *name* lookup, not an exact-native_id lookup —
+# get_by_technical_identity_any_instance has nothing to match against.
+_CONFTITLE_PATTERN = re.compile(r"^CONFTITLE:([^:]*):(.+)$")
 
 # A link at or above this confidence skips human review entirely:
 # state=ACTIVE, origin=SYNC_STRUCTURAL, same treatment as the structural
@@ -125,6 +140,14 @@ _EDGE_TYPE_BY_LINK_KIND: dict[str, EdgeType] = {
     "implements": EdgeType.IMPLEMENTS,
     "specifies": EdgeType.SPECIFIED_BY,
     "changes": EdgeType.CHANGES,
+    # Confluence relationship extraction — vendor-declared or table-parsed,
+    # never inferred (connectors/confluence/mapper.py).
+    "in_space": EdgeType.IN_SPACE,
+    "authored_by": EdgeType.AUTHORED_BY,
+    "commented_on": EdgeType.COMMENTED_ON,
+    "links_to": EdgeType.LINKS_TO,
+    "transcludes": EdgeType.TRANSCLUDES,
+    "has_label": EdgeType.HAS_LABEL,
 }
 
 
@@ -144,6 +167,23 @@ class LinkExtractionStats:
     rejected: int = 0
 
 
+async def _resolve_confluence_title_ref(node_repo: NodeRepository, target_ref: str) -> Node | None:
+    """CONFTITLE:{space_key}:{title} — a page referenced by title+space
+    rather than by numeric id (a `ri:page` link macro with no
+    `ri:content-id`, e.g. a cross-space link). A name lookup, not an
+    exact-native_id one: find the owning SPACE by its `key` attribute,
+    then the PAGE by exact title within that space's whole subtree
+    (nested pages aren't direct children of the space)."""
+    match = _CONFTITLE_PATTERN.match(target_ref)
+    if not match:
+        return None
+    space_key, title = match.group(1), match.group(2)
+    space = await node_repo.get_by_attribute("confluence", "SPACE", "key", space_key)
+    if space is None:
+        return None
+    return await node_repo.find_by_name_under(space.path, "PAGE", title)
+
+
 async def _resolve_target(node_repo: NodeRepository, target_ref: str) -> Node | None:
     """First pattern whose extracted native_id actually resolves to a
     node wins.
@@ -155,6 +195,8 @@ async def _resolve_target(node_repo: NodeRepository, target_ref: str) -> Node | 
     guess which was meant. Returning on the first shape match (the
     previous behaviour) meant a ref whose first-listed interpretation
     didn't exist was dropped even when a later one resolved cleanly."""
+    if target_ref.startswith("CONFTITLE:"):
+        return await _resolve_confluence_title_ref(node_repo, target_ref)
     for pattern, source_system, extractor in LINK_PATTERNS:
         match = pattern.match(target_ref)
         if not match:

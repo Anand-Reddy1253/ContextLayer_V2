@@ -28,6 +28,20 @@ def test_edge_type_values_match_spec():
         "DEPENDS_ON",
         "MENTIONS",
         "RELATED_TO",
+        # Confluence relationship extraction (docs/CONNECTORS.md) — all
+        # vendor-declared or table-parsed, never inferred.
+        "IN_SPACE",
+        "AUTHORED_BY",
+        "COMMENTED_ON",
+        "LINKS_TO",
+        "TRANSCLUDES",
+        "HAS_LABEL",
+        # LLM-inferred document relationships (ADR-011) — always
+        # origin=LLM_INFERRED, always state=PROPOSED.
+        "SUPERSEDES",
+        "SUPERSEDED_BY",
+        "CAUSED_BY",
+        "DECIDES_ON",
     }
 
 
@@ -37,6 +51,7 @@ def test_edge_origin_values():
         "SYNC_EXTRACTED",
         "HUMAN",
         "RULE",
+        "LLM_INFERRED",
     }
 
 

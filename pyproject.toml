@@ -22,6 +22,7 @@ dependencies = [
   "typer>=0.13",
   "structlog>=25.5",
   "httpx>=0.27",
+  "aiosqlite>=0.20",
   "tenacity>=9.0",
   "pyyaml>=6.0",
   "cryptography>=43.0",

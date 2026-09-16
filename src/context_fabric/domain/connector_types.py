@@ -19,7 +19,23 @@ from pydantic import BaseModel, ConfigDict, Field
 # had IMPLEMENTS/SPECIFIED_BY/CHANGES defined and unused — every extracted
 # link used to collapse to MENTIONS/RELATED_TO no matter its source.
 LinkKind = Literal[
-    "mentions", "relates_to", "verifies", "depends_on", "implements", "specifies", "changes"
+    "mentions",
+    "relates_to",
+    "verifies",
+    "depends_on",
+    "implements",
+    "specifies",
+    "changes",
+    # Confluence relationship extraction — all vendor-declared or
+    # table-parsed, never inferred, so each gets its own EdgeType rather
+    # than collapsing into "mentions"/"relates_to" (see
+    # link_extraction._EDGE_TYPE_BY_LINK_KIND).
+    "in_space",
+    "authored_by",
+    "commented_on",
+    "links_to",
+    "transcludes",
+    "has_label",
 ]
 
 

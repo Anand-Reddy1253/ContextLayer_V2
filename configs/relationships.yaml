@@ -23,7 +23,8 @@ kind_groups:
   work_item: [EPIC, FEATURE, STORY, TASK, BUG, WORK_ITEM, ISSUE]
   test: [TEST_CASE, TEST_SUITE, TEST_PLAN]
   change: [PULL_REQUEST, COMMIT]
-  document: [PAGE]
+  document: [PAGE, BLOG_POST]
+  person: [PERSON]
 
 relationships:
   # A test verifies the work item it was written against — never the
@@ -70,3 +71,56 @@ relationships:
   - edge: MENTIONS
     from: ["*"]
     to: ["*"]
+
+  # Confluence relationship extraction (docs/CONNECTORS.md) — all five
+  # vendor-declared or table-parsed, never inferred, so a tight
+  # domain/range is appropriate (unlike MENTIONS/RELATED_TO above).
+  - edge: IN_SPACE
+    from: [document]
+    to: [SPACE]
+
+  - edge: AUTHORED_BY
+    from: [document]
+    to: [person]
+
+  # PERSON -> COMMENT (who left this specific comment), not -> PAGE — the
+  # page is one CONTAINS hop from the comment already, and comments
+  # aren't known yet when a page's own edges are extracted (see
+  # connectors/confluence/mapper.py's map_comment_relationship_links).
+  - edge: COMMENTED_ON
+    from: [person]
+    to: [COMMENT]
+
+  - edge: LINKS_TO
+    from: [document]
+    to: [document]
+
+  - edge: TRANSCLUDES
+    from: [document]
+    to: [document]
+
+  - edge: HAS_LABEL
+    from: [document]
+    to: [LABEL]
+
+  # LLM-inferred document relationships (ADR-011) — always
+  # origin=LLM_INFERRED, always state=PROPOSED, regardless of the model's
+  # own reported confidence. A document's relationship to a business
+  # service (also LLM-inferred, from the same extraction pass) reuses
+  # RELATED_TO above rather than a dedicated rule here — it isn't a
+  # decision relationship between two documents.
+  - edge: SUPERSEDES
+    from: [document]
+    to: [document]
+
+  - edge: SUPERSEDED_BY
+    from: [document]
+    to: [document]
+
+  - edge: CAUSED_BY
+    from: [document]
+    to: [document]
+
+  - edge: DECIDES_ON
+    from: [document]
+    to: [document]

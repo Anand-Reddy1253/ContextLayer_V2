@@ -17,21 +17,26 @@ depends_on: Sequence[str] | str | None = None
 
 
 def upgrade() -> None:
+    is_sqlite = op.get_bind().dialect.name == "sqlite"
+    json_type = "TEXT" if is_sqlite else "JSONB"
+    ts_type = "TEXT" if is_sqlite else "TIMESTAMPTZ"
+    ts_default = "DEFAULT CURRENT_TIMESTAMP" if is_sqlite else "DEFAULT now()"
+
     op.execute(
-        """
+        f"""
         CREATE TABLE task_checkpoint (
             task_ref              TEXT PRIMARY KEY,
             stage                 TEXT NOT NULL,
             objective             TEXT NOT NULL DEFAULT '',
-            context_space_ids     JSONB NOT NULL DEFAULT '[]',
-            accepted_decisions    JSONB NOT NULL DEFAULT '[]',
-            completed_actions     JSONB NOT NULL DEFAULT '[]',
-            files_changed         JSONB NOT NULL DEFAULT '[]',
-            tests_executed        JSONB NOT NULL DEFAULT '[]',
-            unresolved_questions  JSONB NOT NULL DEFAULT '[]',
-            evidence_versions     JSONB NOT NULL DEFAULT '{}',
+            context_space_ids     {json_type} NOT NULL DEFAULT '[]',
+            accepted_decisions    {json_type} NOT NULL DEFAULT '[]',
+            completed_actions     {json_type} NOT NULL DEFAULT '[]',
+            files_changed         {json_type} NOT NULL DEFAULT '[]',
+            tests_executed        {json_type} NOT NULL DEFAULT '[]',
+            unresolved_questions  {json_type} NOT NULL DEFAULT '[]',
+            evidence_versions     {json_type} NOT NULL DEFAULT '{{}}',
             repository_sha        TEXT NULL,
-            updated_at             TIMESTAMPTZ NOT NULL DEFAULT now()
+            updated_at             {ts_type} NOT NULL {ts_default}
         )
         """
     )

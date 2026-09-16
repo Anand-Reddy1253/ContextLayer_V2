@@ -144,6 +144,24 @@ class EdgeRepository:
         await self._session.refresh(row)
         return _to_domain(row)
 
+    async def set_state_bulk(self, edge_ids: list[UUID], state: str, now: datetime) -> list[Edge]:
+        """Same transition as set_state, applied to many rows in one
+        flush instead of one round trip per row — the review queue's bulk
+        confirm/reject action (docs/UI.md "Proposed links review queue").
+        A missing/already-deleted id is silently skipped rather than
+        failing the whole batch, since the caller's selection may be
+        stale by the time this runs (another reviewer acted first)."""
+        updated: list[EdgeORM] = []
+        for edge_id in edge_ids:
+            row = await self._session.get(EdgeORM, edge_id)
+            if row is None:
+                continue
+            row.state = state
+            row.last_seen_at = now
+            updated.append(row)
+        await self._session.flush()
+        return [_to_domain(row) for row in updated]
+
     async def retype_dst(self, edge_id: UUID, dst_id: UUID, now: datetime) -> Edge | None:
         """A human picked a different target than what was proposed
         (e.g. a different team) — updates the edge in place and confirms
@@ -157,6 +175,29 @@ class EdgeRepository:
         await self._session.flush()
         await self._session.refresh(row)
         return _to_domain(row)
+
+    async def list_touching_any(
+        self, node_ids: list[UUID], *, exclude_types: list[str] | None = None
+    ) -> list[Edge]:
+        """Every edge with at least one end in `node_ids` — the batched
+        form of list_touching, for "every real cross-reference out of this
+        whole subtree, not just its root" (docs/UI.md "Catalog Explorer"
+        full-graph view). Unlike list_among, this deliberately *does*
+        include edges to something outside `node_ids` — that's the whole
+        point: a cross-vendor MENTIONS/IMPLEMENTS edge always points
+        outside a node's own path-subtree (different source system means
+        a completely different path tree), so list_among alone can never
+        surface it."""
+        if not node_ids:
+            return []
+        stmt = select(EdgeORM).where(
+            or_(EdgeORM.src_id.in_(node_ids), EdgeORM.dst_id.in_(node_ids)),
+            EdgeORM.deleted_at.is_(None),
+        )
+        if exclude_types:
+            stmt = stmt.where(EdgeORM.type.notin_(exclude_types))
+        rows = (await self._session.execute(stmt)).scalars().all()
+        return [_to_domain(r) for r in rows]
 
     async def list_among(self, node_ids: list[UUID]) -> list[Edge]:
         """Every edge whose src AND dst are both within `node_ids`

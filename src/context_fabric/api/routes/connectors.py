@@ -25,12 +25,14 @@ from context_fabric.connectors.jira.live import JiraLiveConnector
 from context_fabric.connectors.teams.live import TeamsLiveConnector
 from context_fabric.domain.errors import ConnectorError
 from context_fabric.enrichment.confluence_abstracts import enrich_confluence_pages
+from context_fabric.enrichment.llm_relationships import extract_llm_relationships
 from context_fabric.enrichment.node_embeddings import enrich_node_embeddings
 from context_fabric.enrichment.ollama_client import OllamaClient
 from context_fabric.persistence.repositories.connector_connection import (
     ConnectorConnectionRepository,
     ConnectorConnectionSummary,
 )
+from context_fabric.persistence.repositories.edge import EdgeRepository
 from context_fabric.persistence.repositories.node import NodeRepository
 from context_fabric.persistence.repositories.sync_run import SyncRunRepository
 from context_fabric.persistence.repositories.sync_state import SyncStateRepository
@@ -108,6 +110,11 @@ class EnrichTriggerResponse(BaseModel):
     skipped_not_synced: int
     errors: int
     duration_seconds: float
+    # LLM-inferred relationships (ADR-011) — Confluence only, 0 for every
+    # other connector (no page_type classification signal exists there).
+    services_proposed: int = 0
+    relationships_proposed: int = 0
+    unmatched_references: int = 0
 
 
 @router.get("", response_model=list[ConnectorConnectionSummary])
@@ -571,14 +578,33 @@ async def trigger_enrichment(
                 embed_model=settings.CF_OLLAMA_EMBED_MODEL,
                 force=force,
             )
+            # A separate pass, not folded into enrich_confluence_pages —
+            # ADR-011's extraction is content-hash-gated on its own
+            # attribute (llm_relationships_source_hash) and has its own
+            # failure mode (a model call per classified document, not per
+            # page), so keeping it a distinct call keeps a slow/broken
+            # relationship pass from ever blocking the abstract/embedding
+            # pass it runs alongside.
+            relationship_stats = await extract_llm_relationships(
+                connector,
+                NodeRepository(session),
+                EdgeRepository(session),
+                ollama,
+                source_instance_id=connection.instance_id,
+                model_name=settings.CF_OLLAMA_MODEL,
+                force=force,
+            )
             response = EnrichTriggerResponse(
                 nodes_scanned=page_stats.pages_scanned,
                 abstracts_generated=page_stats.abstracts_generated,
                 embeddings_generated=page_stats.embeddings_generated,
                 skipped_unchanged=page_stats.skipped_unchanged,
                 skipped_not_synced=page_stats.skipped_not_synced,
-                errors=page_stats.errors,
+                errors=page_stats.errors + relationship_stats.errors,
                 duration_seconds=0.0,
+                services_proposed=relationship_stats.services_proposed,
+                relationships_proposed=relationship_stats.relationships_proposed,
+                unmatched_references=relationship_stats.unmatched_references,
             )
         else:
             node_stats = await enrich_node_embeddings(

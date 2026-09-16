@@ -36,6 +36,13 @@ depends_on: Sequence[str] | str | None = None
 
 
 def upgrade() -> None:
+    # Postgres-only (GIN, jsonb_path_ops, pg_trgm) — no SQLite equivalent
+    # without an FTS5 rewrite, deliberately not built (see the dual-
+    # backend note in docs/CONNECTORS.md and ADR-010): SQLite attribute/
+    # name queries stay unindexed sequential scans, an accepted tradeoff
+    # at this project's data scale.
+    if op.get_bind().dialect.name == "sqlite":
+        return
     op.execute("CREATE EXTENSION IF NOT EXISTS pg_trgm")
     op.execute(
         "CREATE INDEX IF NOT EXISTS ix_node_attributes_gin "
@@ -47,6 +54,8 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    if op.get_bind().dialect.name == "sqlite":
+        return
     op.execute("DROP INDEX IF EXISTS ix_node_name_trgm")
     op.execute("DROP INDEX IF EXISTS ix_node_attributes_gin")
     # pg_trgm is deliberately left installed — dropping a database-wide

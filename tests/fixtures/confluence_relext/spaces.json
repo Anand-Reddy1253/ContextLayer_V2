@@ -1,0 +1,18 @@
+[
+  {
+    "id": "9020001",
+    "key": "TALENT9",
+    "name": "TalentFlow (relext test)",
+    "description": { "plain": { "value": "test space", "representation": "plain" } },
+    "url": "https://acme.atlassian.net/wiki/spaces/TALENT9",
+    "type": "global"
+  },
+  {
+    "id": "9020002",
+    "key": "PLAT9",
+    "name": "Platform (relext test)",
+    "description": { "plain": { "value": "test space", "representation": "plain" } },
+    "url": "https://acme.atlassian.net/wiki/spaces/PLAT9",
+    "type": "global"
+  }
+]

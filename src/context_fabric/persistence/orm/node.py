@@ -5,8 +5,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from sqlalchemy import ForeignKey, Integer, Text
-from sqlalchemy.dialects.postgresql import JSONB, TIMESTAMP, UUID
+from sqlalchemy import JSON, DateTime, ForeignKey, Integer, Text, Uuid
 from sqlalchemy.orm import Mapped, mapped_column
 
 from context_fabric.persistence.orm.base import Base
@@ -16,20 +15,20 @@ from context_fabric.persistence.orm.types import LTree
 class NodeORM(Base):
     __tablename__ = "node"
 
-    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True)
     layer: Mapped[str] = mapped_column(Text, nullable=False)
     kind: Mapped[str] = mapped_column(Text, nullable=False)
     capability: Mapped[str | None] = mapped_column(Text, nullable=True)
     name: Mapped[str] = mapped_column(Text, nullable=False)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
-    owners: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    owners: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
 
     source_system: Mapped[str | None] = mapped_column(Text, nullable=True)
     source_instance_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     native_id: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     parent_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("node.id"), nullable=True
+        Uuid, ForeignKey("node.id"), nullable=True
     )
     path: Mapped[str] = mapped_column(LTree, nullable=False)
 
@@ -38,11 +37,11 @@ class NodeORM(Base):
     source_version: Mapped[str | None] = mapped_column(Text, nullable=True)
     content_hash: Mapped[str | None] = mapped_column(Text, nullable=True)
 
-    acl_ref: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
-    attributes: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    acl_ref: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    attributes: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
 
-    first_seen_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
-    last_seen_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
-    deleted_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
-    created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
-    updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
+    first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)

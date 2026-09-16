@@ -17,7 +17,14 @@ import structlog
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from context_fabric.api.routes import catalog, connectors, context_spaces, org
+from context_fabric.api.routes import (
+    catalog,
+    connectors,
+    context_spaces,
+    org,
+    retrieval,
+    workflow_templates,
+)
 from context_fabric.settings import Settings
 from context_fabric.synchronization import scheduler
 
@@ -57,6 +64,8 @@ app.include_router(connectors.router)
 app.include_router(catalog.router)
 app.include_router(org.router)
 app.include_router(context_spaces.router)
+app.include_router(retrieval.router)
+app.include_router(workflow_templates.router)
 
 
 @app.get("/healthz")

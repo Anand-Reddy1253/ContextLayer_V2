@@ -17,10 +17,15 @@ depends_on: Sequence[str] | str | None = None
 
 
 def upgrade() -> None:
-    op.execute("CREATE EXTENSION IF NOT EXISTS pgcrypto")
-    op.execute("CREATE EXTENSION IF NOT EXISTS ltree")
+    # Postgres-only — SQLite has no extension system and needs none of
+    # these (pgcrypto's gen_random_uuid() is replaced by client-side UUID
+    # generation via the ORM's Uuid column type; ltree by plain TEXT).
+    if op.get_bind().dialect.name != "sqlite":
+        op.execute("CREATE EXTENSION IF NOT EXISTS pgcrypto")
+        op.execute("CREATE EXTENSION IF NOT EXISTS ltree")
 
 
 def downgrade() -> None:
-    op.execute("DROP EXTENSION IF EXISTS ltree")
-    op.execute("DROP EXTENSION IF EXISTS pgcrypto")
+    if op.get_bind().dialect.name != "sqlite":
+        op.execute("DROP EXTENSION IF EXISTS ltree")
+        op.execute("DROP EXTENSION IF EXISTS pgcrypto")

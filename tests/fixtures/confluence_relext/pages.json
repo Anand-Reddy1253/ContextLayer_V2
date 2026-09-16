@@ -1,0 +1,54 @@
+[
+  {
+    "id": "9021001",
+    "spaceId": "9020001",
+    "parentId": null,
+    "title": "Identity Squad Home (relext test)",
+    "status": "current",
+    "version": 1,
+    "body": "<p>Home page.</p>",
+    "url": "https://acme.atlassian.net/wiki/spaces/TALENT9/pages/9021001",
+    "authorId": "acc-relext-identity-lead",
+    "authorName": "Identity Squad Lead (relext test)",
+    "labels": ["home"]
+  },
+  {
+    "id": "9021002",
+    "spaceId": "9020001",
+    "parentId": "9021001",
+    "title": "SSO Design Doc (relext test)",
+    "status": "current",
+    "version": 1,
+    "body": "<p>Design for SSO.</p>",
+    "url": "https://acme.atlassian.net/wiki/spaces/TALENT9/pages/9021002",
+    "authorId": "acc-relext-identity-lead",
+    "authorName": "Identity Squad Lead (relext test)",
+    "labels": ["design"]
+  },
+  {
+    "id": "9021003",
+    "spaceId": "9020002",
+    "parentId": null,
+    "title": "Platform Engineering Home (relext test)",
+    "status": "current",
+    "version": 1,
+    "body": "<p>Platform engineering docs.</p>",
+    "url": "https://acme.atlassian.net/wiki/spaces/PLAT9/pages/9021003",
+    "authorId": "acc-relext-platform-lead",
+    "authorName": "Platform Lead (relext test)",
+    "labels": ["home"]
+  },
+  {
+    "id": "9021004",
+    "spaceId": "9020001",
+    "parentId": null,
+    "title": "ADR-014 Move settlement to event sourcing (relext test)",
+    "status": "current",
+    "version": 1,
+    "body": "<ac:structured-macro ac:name=\"details\"><ac:rich-text-body><table><tbody><tr><th>Status</th><td>Accepted</td></tr><tr><th>Context</th><td>We needed event-driven settlement.</td></tr><tr><th>Decision</th><td>Move to event sourcing.</td></tr><tr><th>Consequences</th><td>Requires new infra.</td></tr></tbody></table></ac:rich-text-body></ac:structured-macro><p>Reviewed by <ac:link><ri:user ri:account-id=\"acc-relext-identity-lead\"/></ac:link>.</p><p>Tracked in <ac:structured-macro ac:name=\"jira\"><ac:parameter ac:name=\"key\">TALENT9-9</ac:parameter></ac:structured-macro>.</p><p>See also <ac:link><ri:page ri:content-title=\"Platform Engineering Home (relext test)\" ri:space-key=\"PLAT9\"/></ac:link> for related infra docs.</p><ac:structured-macro ac:name=\"include\"><ac:parameter ac:name=\"page\"><ri:page ri:content-title=\"Platform Engineering Home (relext test)\" ri:space-key=\"PLAT9\"/></ac:parameter></ac:structured-macro>",
+    "url": "https://acme.atlassian.net/wiki/spaces/TALENT9/pages/9021004",
+    "authorId": "acc-relext-identity-lead",
+    "authorName": "Identity Squad Lead (relext test)",
+    "labels": ["adr", "decision"]
+  }
+]

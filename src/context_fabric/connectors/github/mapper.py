@@ -13,11 +13,26 @@ from __future__ import annotations
 import hashlib
 import json
 import posixpath
-import re
 from typing import Any
 
-import yaml
-
+from context_fabric.connectors.ai_assets import (
+    AI_ASSET_PATH_RULES as AI_ASSET_PATH_RULES,
+)
+from context_fabric.connectors.ai_assets import (
+    ai_asset_native_id as ai_asset_native_id,
+)
+from context_fabric.connectors.ai_assets import (
+    classify_ai_asset_path as classify_ai_asset_path,
+)
+from context_fabric.connectors.ai_assets import (
+    map_ai_asset as map_ai_asset,
+)
+from context_fabric.connectors.ai_assets import (
+    parse_ai_asset_description as parse_ai_asset_description,
+)
+from context_fabric.connectors.ai_assets import (
+    parse_ai_asset_ref as parse_ai_asset_ref,
+)
 from context_fabric.connectors.cross_references import extract_cross_references
 from context_fabric.domain.connector_types import (
     ACLReference,
@@ -26,59 +41,6 @@ from context_fabric.domain.connector_types import (
     SourceLink,
     SourceObject,
 )
-
-AI_ASSET_PATH_RULES: list[tuple[str, str, str]] = [
-    (".github/agents/", "github", "agent"),
-    (".github/skills/", "github", "skill"),
-    (".github/prompts/", "github", "prompt"),
-    (".claude/agents/", "claude", "agent"),
-    (".claude/skills/", "claude", "skill"),
-    (".claude/commands/", "claude", "command"),
-    (".cursor/rules/", "cursor", "rule"),
-]
-
-_FRONTMATTER_PATTERN = re.compile(r"^---\s*\n(.*?\n)---\s*\n", re.DOTALL)
-
-
-def classify_ai_asset_path(path: str) -> tuple[str, str] | None:
-    """Returns (vendor, asset_type) if `path` falls under a recognized
-    AI-asset directory, else None — used to decide, from the repo's tree
-    listing alone (no content fetch needed yet), which files are even
-    worth fetching. Agent/skill/rule definitions are always markdown
-    (`.md`) — a `.json` or other file sitting in the same directory
-    (e.g. a `scope-map.json` config alongside real agent files) is
-    support tooling, not a definition, and is excluded."""
-    if not path.endswith(".md"):
-        return None
-    for prefix, vendor, asset_type in AI_ASSET_PATH_RULES:
-        if path.startswith(prefix) and path != prefix:
-            return vendor, asset_type
-    return None
-
-
-def parse_ai_asset_description(text: str, *, fallback_name: str) -> tuple[str, str]:
-    """(name, description) from a skill/agent/rule file's own YAML
-    frontmatter (`name:`/`description:`, the convention all three
-    vendors use) when present; otherwise the first non-empty line of
-    body text, truncated — a short excerpt only, never the full body
-    (ADR-003: this is metadata for a catalog card, not a content
-    replica)."""
-    match = _FRONTMATTER_PATTERN.match(text)
-    if match:
-        try:
-            data = yaml.safe_load(match.group(1)) or {}
-        except yaml.YAMLError:
-            data = {}
-        if isinstance(data, dict):
-            name = str(data.get("name") or fallback_name)
-            description = str(data.get("description") or "")
-            if description:
-                return name, description[:300]
-    for line in text.splitlines():
-        stripped = line.strip().lstrip("#").strip()
-        if stripped:
-            return fallback_name, stripped[:300]
-    return fallback_name, ""
 
 
 def _content_hash(raw: dict[str, Any]) -> str:
@@ -91,28 +53,6 @@ def branch_native_id(repo_full_name: str, branch_name: str) -> str:
 
 def tree_entry_native_id(repo_full_name: str, branch_name: str, path: str) -> str:
     return f"{branch_native_id(repo_full_name, branch_name)}:{path}"
-
-
-_AI_ASSET_MARKER = ":ai-asset:"
-
-
-def ai_asset_native_id(repo_full_name: str, path: str) -> str:
-    return f"{repo_full_name}{_AI_ASSET_MARKER}{path}"
-
-
-def parse_ai_asset_ref(native_id: str) -> tuple[str, str] | None:
-    """(repo_full_name, path) for an AI_ASSET native_id, else None.
-
-    AI assets deliberately don't carry a branch in their native_id (they
-    come from the repo's default branch), so they don't fit parse_ref's
-    "repo@branch:path" shape — which silently returned path=None for them,
-    making get_content() raise NotFound for every agent and skill in the
-    catalog. That meant the AI Explorer could tell you an agent existed
-    but never hand back the definition needed to actually run it."""
-    repo, marker, path = native_id.partition(_AI_ASSET_MARKER)
-    if not marker or not path:
-        return None
-    return repo, path
 
 
 def parse_ref(native_id: str) -> tuple[str, str, str | None]:
@@ -148,24 +88,6 @@ def map_repository(raw: dict[str, Any]) -> SourceObject:
         },
         description=(raw.get("description") or "")[:512] or None,
         content_hash=_content_hash(raw),
-    )
-
-
-def map_ai_asset(
-    repo_full_name: str, path: str, *, vendor: str, asset_type: str, name: str, description: str
-) -> SourceObject:
-    return SourceObject(
-        native_id=ai_asset_native_id(repo_full_name, path),
-        kind="AI_ASSET",
-        name=name,
-        parent_native_id=repo_full_name,
-        attributes={
-            "vendor": vendor,
-            "asset_type": asset_type,
-            "path": path,
-        },
-        description=description or None,
-        content_hash=hashlib.sha256(description.encode("utf-8")).hexdigest(),
     )
 
 

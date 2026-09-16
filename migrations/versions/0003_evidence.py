@@ -17,22 +17,40 @@ depends_on: Sequence[str] | str | None = None
 
 
 def upgrade() -> None:
-    op.execute(
-        """
-        CREATE TABLE evidence (
-            id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-            node_id             UUID NOT NULL REFERENCES node(id),
-            source_system       TEXT NOT NULL,
-            source_instance_id  TEXT NOT NULL,
-            native_id           TEXT NOT NULL,
-            source_version      TEXT NULL,
-            uri                 TEXT NOT NULL,
-            content_hash        TEXT NULL,
-            acl_ref             JSONB NOT NULL DEFAULT '{}',
-            retrieved_at        TIMESTAMPTZ NOT NULL DEFAULT now()
+    if op.get_bind().dialect.name == "sqlite":
+        op.execute(
+            """
+            CREATE TABLE evidence (
+                id                  TEXT PRIMARY KEY,
+                node_id             TEXT NOT NULL REFERENCES node(id),
+                source_system       TEXT NOT NULL,
+                source_instance_id  TEXT NOT NULL,
+                native_id           TEXT NOT NULL,
+                source_version      TEXT NULL,
+                uri                 TEXT NOT NULL,
+                content_hash        TEXT NULL,
+                acl_ref             TEXT NOT NULL DEFAULT '{}',
+                retrieved_at        TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            """
         )
-        """
-    )
+    else:
+        op.execute(
+            """
+            CREATE TABLE evidence (
+                id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                node_id             UUID NOT NULL REFERENCES node(id),
+                source_system       TEXT NOT NULL,
+                source_instance_id  TEXT NOT NULL,
+                native_id           TEXT NOT NULL,
+                source_version      TEXT NULL,
+                uri                 TEXT NOT NULL,
+                content_hash        TEXT NULL,
+                acl_ref             JSONB NOT NULL DEFAULT '{}',
+                retrieved_at        TIMESTAMPTZ NOT NULL DEFAULT now()
+            )
+            """
+        )
     op.execute("CREATE INDEX ix_evidence_node ON evidence (node_id)")
 
 

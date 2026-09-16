@@ -168,11 +168,56 @@ async def test_resolve_scope_unrecognized_task_ref_pattern(db_session):
     node_repo = NodeRepository(db_session)
     context_space_repo = ContextSpaceRepository(db_session)
 
-    result = await resolve_scope(node_repo, context_space_repo, "JIRA-123", actor_id="test-actor")
+    # Not "JIRA-123" — that's now a recognized Jira-issue-key shape (task_ref
+    # now covers Jira/GitHub/Confluence, not just AB#), so it would resolve
+    # to "unrecognized source_system" or "never synced," not "no pattern."
+    result = await resolve_scope(
+        node_repo, context_space_repo, "not a task ref at all", actor_id="test-actor"
+    )
 
     assert result.resolved is False
     assert "matches no known pattern" in (result.reason or "")
     assert result.candidates == []
+
+
+async def test_resolve_scope_jira_task_ref_never_synced(db_session):
+    node_repo = NodeRepository(db_session)
+    context_space_repo = ContextSpaceRepository(db_session)
+
+    result = await resolve_scope(
+        node_repo, context_space_repo, "TALENT-9019999999", actor_id="test-actor"
+    )
+
+    assert result.resolved is False
+    assert result.source_system == "jira"
+    assert result.native_id == "TALENT-9019999999"
+    assert "no synced technical node" in (result.reason or "")
+
+
+async def test_resolve_scope_github_task_ref_never_synced(db_session):
+    node_repo = NodeRepository(db_session)
+    context_space_repo = ContextSpaceRepository(db_session)
+
+    result = await resolve_scope(
+        node_repo, context_space_repo, "acme-org-p9test/never-synced#9999", actor_id="test-actor"
+    )
+
+    assert result.resolved is False
+    assert result.source_system == "github"
+    assert result.native_id == "acme-org-p9test/never-synced#9999"
+
+
+async def test_resolve_scope_confluence_task_ref_never_synced(db_session):
+    node_repo = NodeRepository(db_session)
+    context_space_repo = ContextSpaceRepository(db_session)
+
+    result = await resolve_scope(
+        node_repo, context_space_repo, "CONFPAGE-9019999999", actor_id="test-actor"
+    )
+
+    assert result.resolved is False
+    assert result.source_system == "confluence"
+    assert result.native_id == "9019999999"
 
 
 async def test_resolve_scope_task_ref_never_synced(db_session):

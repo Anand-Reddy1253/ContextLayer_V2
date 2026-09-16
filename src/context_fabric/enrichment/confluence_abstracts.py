@@ -50,12 +50,14 @@ class EnrichmentStats:
     errors: int = 0
 
 
-async def _collect_page_native_ids(connector: SourceConnector) -> list[str]:
+async def collect_page_native_ids(connector: SourceConnector) -> list[str]:
     """Read-only BFS over the connector's hierarchy — same shape as
     synchronization/orchestrator.py's `_sync_hierarchy`, minus every
     node/edge write. Needed purely so get_content() has a populated cache
     to read from (confluence/live.py's get_content only serves content for
-    native_ids the connector has already seen this session)."""
+    native_ids the connector has already seen this session). Public
+    (not `_`-prefixed) because enrichment/llm_relationships.py (ADR-011)
+    reuses the exact same walk rather than duplicating it."""
     page_native_ids: list[str] = []
     containers = await connector.discover_containers()
     queue: deque[str] = deque(c.native_id for c in containers)
@@ -94,7 +96,7 @@ async def enrich_confluence_pages(
     stats = EnrichmentStats()
     now = datetime.now(UTC).isoformat()
 
-    page_native_ids = await _collect_page_native_ids(connector)
+    page_native_ids = await collect_page_native_ids(connector)
 
     for native_id in page_native_ids:
         stats.pages_scanned += 1

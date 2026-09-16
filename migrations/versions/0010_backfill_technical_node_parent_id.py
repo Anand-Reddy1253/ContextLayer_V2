@@ -27,6 +27,14 @@ depends_on: Sequence[str] | str | None = None
 
 
 def upgrade() -> None:
+    # Postgres-only (nlevel()/subpath() are ltree functions, no SQLite
+    # equivalent) *and* moot there regardless: this backfills rows synced
+    # before a code fix that predates SQLite support entirely, so a fresh
+    # SQLite database reaching this migration has no such rows to fix —
+    # the code orchestrator.py backfills correctly already writes
+    # parent_id going forward, on both backends.
+    if op.get_bind().dialect.name == "sqlite":
+        return
     op.execute(
         """
         UPDATE node AS child

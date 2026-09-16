@@ -17,7 +17,7 @@ from __future__ import annotations
 from typing import Literal
 from uuid import UUID
 
-from sqlalchemy import text
+from sqlalchemy import bindparam, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from context_fabric.domain.enums import EdgeType
@@ -36,8 +36,13 @@ async def _traverse_one_direction(
 ) -> set[UUID]:
     start_col, root_col = ("dst_id", "src_id") if direction == "out" else ("src_id", "dst_id")
 
-    base_type_clause = "AND type = ANY(:edge_types)" if edge_types else ""
-    step_type_clause = "AND e.type = ANY(:edge_types)" if edge_types else ""
+    # Not `type = ANY(:edge_types)` — that's Postgres's array-parameter
+    # syntax, and SQLite has no array type at all. `type IN :edge_types`
+    # with an `expanding=True` bindparam is SQLAlchemy's dialect-agnostic
+    # equivalent, expanding to the right list-literal SQL for whichever
+    # backend is connected.
+    base_type_clause = "AND type IN :edge_types" if edge_types else ""
+    step_type_clause = "AND e.type IN :edge_types" if edge_types else ""
 
     sql = text(
         f"""
@@ -62,6 +67,7 @@ async def _traverse_one_direction(
     )
     params: dict[str, object] = {"root_id": root_id, "max_hops": max_hops}
     if edge_types:
+        sql = sql.bindparams(bindparam("edge_types", expanding=True))
         params["edge_types"] = [t.value for t in edge_types]
 
     result = await session.execute(sql, params)

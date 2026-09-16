@@ -1,0 +1,45 @@
+# Confluence page template classification (connectors/confluence/
+# page_properties.py, docs/CONNECTORS.md). Confluence records no
+# template_id after page creation — what persists is the blueprint label
+# a human (or the template itself) attached, so classification order is
+# labels -> page-properties keys -> title regex -> unclassified. No LLM
+# fallback: that tier (Tier 3's semantic classification) is explicitly
+# deferred, so an unrecognized page stays page_type: null rather than a
+# guess.
+#
+# `label` matches any of a page's own Confluence labels (case-insensitive).
+# `page_properties_keys` matches if the page's Page Properties macro table
+# (ac:name="details") contains at least one of these keys, snake_cased.
+# `title_pattern` is a last-resort regex against the page title. First
+# matching template wins, checked in this file's declared order — put more
+# specific/confident signals first.
+#
+# `schema_completeness` (stored on the node, not declared here) is the
+# fraction of `expected_keys` actually present in that page's own
+# page-properties table — lets a caller find e.g. "PRDs missing
+# target_release" instead of treating a dropped row as silently absent.
+
+templates:
+  - name: adr
+    labels: [decision, adr, architecture-decision]
+    page_properties_keys: [adr_status, decision_status]
+    title_pattern: '(?i)^ADR[\s-]?\d*'
+    expected_keys: [status, context, decision, consequences]
+
+  - name: postmortem
+    labels: [incident-report, postmortem, post-mortem]
+    page_properties_keys: [severity_level, incident_date]
+    title_pattern: '(?i)^(post-?mortem|incident report)'
+    expected_keys: [severity, root_cause, detection, action_items]
+
+  - name: prd
+    labels: [prd, product-requirements]
+    page_properties_keys: [target_release, success_metrics]
+    title_pattern: '(?i)^PRD[\s:-]'
+    expected_keys: [problem, goals, non_goals, requirements, success_metrics]
+
+  - name: meeting_notes
+    labels: [meeting-notes, meetingnotes]
+    page_properties_keys: [attendees, meeting_date]
+    title_pattern: '(?i)meeting notes'
+    expected_keys: [attendees, agenda, action_items]

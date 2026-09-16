@@ -54,9 +54,9 @@ async def test_enrich_generates_abstracts_and_embeddings_for_every_synced_page(d
         embed_model=_EMBED_MODEL,
     )
 
-    assert stats.pages_scanned == 3
-    assert stats.abstracts_generated == 3
-    assert stats.embeddings_generated == 3
+    assert stats.pages_scanned == 4
+    assert stats.abstracts_generated == 4
+    assert stats.embeddings_generated == 4
     assert stats.skipped_unchanged == 0
     assert stats.skipped_not_synced == 0
     assert stats.errors == 0
@@ -99,7 +99,7 @@ async def test_rerun_without_force_skips_unchanged_pages(db_session):
 
     assert stats.abstracts_generated == 0
     assert stats.embeddings_generated == 0
-    assert stats.skipped_unchanged == 3
+    assert stats.skipped_unchanged == 4
     assert second_ollama.calls == []
     assert second_ollama.embed_calls == []
 
@@ -126,8 +126,8 @@ async def test_force_regenerates_unchanged_pages(db_session):
         force=True,
     )
 
-    assert stats.abstracts_generated == 3
-    assert stats.embeddings_generated == 3
+    assert stats.abstracts_generated == 4
+    assert stats.embeddings_generated == 4
     assert stats.skipped_unchanged == 0
 
 
@@ -143,8 +143,8 @@ async def test_pages_not_yet_synced_are_skipped_not_created(db_session):
         embed_model=_EMBED_MODEL,
     )
 
-    assert stats.pages_scanned == 3
-    assert stats.skipped_not_synced == 3
+    assert stats.pages_scanned == 4
+    assert stats.skipped_not_synced == 4
     assert stats.abstracts_generated == 0
     assert (
         await node_repo.get_by_technical_identity("confluence", _INSTANCE_ID, "131073")
@@ -168,10 +168,10 @@ async def test_a_failed_abstract_is_counted_and_others_still_succeed(db_session)
     )
 
     assert stats.errors == 1
-    assert stats.abstracts_generated == 2
+    assert stats.abstracts_generated == 3
     # Embedding is an independent operation — it should still succeed for
     # the same page whose abstract failed.
-    assert stats.embeddings_generated == 3
+    assert stats.embeddings_generated == 4
     failed_page = await node_repo.get_by_technical_identity("confluence", _INSTANCE_ID, "131073")
     assert "llm_abstract" not in failed_page.attributes
     assert "embedding" in failed_page.attributes
@@ -193,8 +193,8 @@ async def test_a_failed_embedding_does_not_lose_a_successful_abstract(db_session
     )
 
     assert stats.errors == 1
-    assert stats.abstracts_generated == 3
-    assert stats.embeddings_generated == 2
+    assert stats.abstracts_generated == 4
+    assert stats.embeddings_generated == 3
     page = await node_repo.get_by_technical_identity("confluence", _INSTANCE_ID, "131073")
     assert page.attributes["llm_abstract"].startswith("Summary of:")
     assert "embedding" not in page.attributes
@@ -228,8 +228,8 @@ async def test_embedding_backfills_without_regenerating_an_already_correct_abstr
         embed_model=_EMBED_MODEL,
     )
 
-    assert stats.abstracts_generated == 2  # the other two pages only
-    assert stats.embeddings_generated == 3  # all three, including this one
+    assert stats.abstracts_generated == 3  # the other three pages only
+    assert stats.embeddings_generated == 4  # all four, including this one
     updated = await node_repo.get_by_technical_identity("confluence", _INSTANCE_ID, "131073")
     assert updated.attributes["llm_abstract"] == "A pre-existing abstract."  # untouched
     assert "embedding" in updated.attributes

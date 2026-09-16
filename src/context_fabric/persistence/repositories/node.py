@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from context_fabric.domain.enums import Capability, Layer, NodeStatus
 from context_fabric.domain.node import Node
+from context_fabric.persistence.dialect_compat import path_contains
 from context_fabric.persistence.orm.node import NodeORM
 
 
@@ -183,8 +184,10 @@ class NodeRepository:
         self, ancestor_path: str, *, include_self: bool = True
     ) -> list[Node]:
         """Everything under `ancestor_path` (docs/persistence.md "Query
-        patterns": `WHERE path <@ :ancestor_path`)."""
-        stmt = select(NodeORM).where(NodeORM.path.op("<@")(ancestor_path))
+        patterns": `WHERE path <@ :ancestor_path` on Postgres — see
+        persistence/dialect_compat.py for the SQLite equivalent)."""
+        dialect_name = self._session.get_bind().dialect.name
+        stmt = select(NodeORM).where(path_contains(NodeORM.path, ancestor_path, dialect_name))
         rows = (await self._session.execute(stmt)).scalars().all()
         results = [_to_domain(r) for r in rows]
         if not include_self:
@@ -206,6 +209,49 @@ class NodeRepository:
         if row is not None:
             row.deleted_at = deleted_at
             await self._session.flush()
+
+    async def get_by_attribute(
+        self, source_system: str, kind: str, attr_key: str, attr_value: str
+    ) -> Node | None:
+        """A node identified by an attribute value rather than its
+        native_id — synchronization/link_extraction.py's CONFTITLE:
+        resolution needs this to find a Confluence SPACE by its `key`
+        attribute (Confluence's short space code, e.g. "TALENT" — distinct
+        from the space's own numeric native_id) before it can look up a
+        page by title within it. No source_instance_id param, same
+        "any instance" limitation get_by_technical_identity_any_instance
+        already documents — the caller here has no instance context to
+        narrow by. `.as_string()` is SQLAlchemy's dialect-portable
+        JSON-value accessor (verified against both Postgres and SQLite —
+        see retrieval/query_compiler.py's identical use), so no dialect
+        branch is needed here."""
+        stmt = select(NodeORM).where(
+            NodeORM.source_system == source_system,
+            NodeORM.kind == kind,
+            NodeORM.attributes[attr_key].as_string() == attr_value,
+            NodeORM.deleted_at.is_(None),
+        )
+        row = (await self._session.execute(stmt)).scalars().first()
+        return _to_domain(row) if row is not None else None
+
+    async def find_by_name_under(self, ancestor_path: str, kind: str, name: str) -> Node | None:
+        """A node by exact name, anywhere under `ancestor_path` — the
+        other half of link_extraction.py's CONFTITLE: resolution: once the
+        owning SPACE is found (get_by_attribute above), the referenced
+        PAGE is looked up by title within that space's whole subtree
+        (nested pages aren't direct children of the space, so a plain
+        list_direct_children wouldn't find them). Confluence page titles
+        are unique within a space, so an exact match is safe here — this
+        is not a fuzzy or partial-match lookup."""
+        dialect_name = self._session.get_bind().dialect.name
+        stmt = select(NodeORM).where(
+            path_contains(NodeORM.path, ancestor_path, dialect_name),
+            NodeORM.kind == kind,
+            NodeORM.name == name,
+            NodeORM.deleted_at.is_(None),
+        )
+        row = (await self._session.execute(stmt)).scalars().first()
+        return _to_domain(row) if row is not None else None
 
     async def list_active_native_ids(
         self, source_system: str, source_instance_id: str

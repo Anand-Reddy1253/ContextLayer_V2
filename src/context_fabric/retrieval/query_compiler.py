@@ -43,6 +43,7 @@ from context_fabric.domain.query import (
     RuleGroup,
 )
 from context_fabric.graph.traversal import traverse
+from context_fabric.persistence.dialect_compat import path_contains
 from context_fabric.persistence.orm.node import NodeORM
 
 
@@ -91,9 +92,13 @@ def _column_for(property_name: str) -> Any:
             f"unknown meta-property {property_name!r}; "
             f"known: {', '.join(sorted(META_PROPERTIES) + sorted(META_ATTRIBUTE_ALIASES))}"
         )
-    # `.astext` renders as `attributes ->> :key` with the key bound, not
-    # inlined — a property name can never become SQL.
-    return NodeORM.attributes[key].astext
+    # `.as_string()` renders as `attributes ->> :key` on Postgres /
+    # `JSON_EXTRACT(attributes, :key)` on SQLite, with the key bound, not
+    # inlined either way — a property name can never become SQL. (Not
+    # `.astext`: that's Postgres-JSONB-only; `.as_string()` is
+    # SQLAlchemy's generic, dialect-portable equivalent — verified to
+    # compile correctly on both.)
+    return NodeORM.attributes[key].as_string()
 
 
 def _escape_like(value: str) -> str:
@@ -101,20 +106,22 @@ def _escape_like(value: str) -> str:
     return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
-def _compile_property(rule: PropertyRule) -> ColumnElement[bool]:
+def _compile_property(rule: PropertyRule, dialect_name: str) -> ColumnElement[bool]:
     col = _column_for(rule.property)
     op = rule.operator
     value = rule.value
 
-    # `path` is an ltree, not text — Postgres has no `ltree ILIKE text`, and
-    # the string operators would be the wrong tool anyway. "beginsWith" on a
-    # path means "descendant of", which ltree expresses natively as `<@` and
-    # which `ix_node_path_gist` already indexes. Same operator
+    # `path` is an ltree (Postgres) or plain text (SQLite — see
+    # persistence/orm/types.py's LTree), not something string operators are
+    # the right tool for either way. "beginsWith" on a path means
+    # "descendant of", which ltree expresses natively as `<@`
+    # (`ix_node_path_gist`-indexed) and SQLite as a prefix LIKE — see
+    # persistence/dialect_compat.py, the same helper
     # NodeRepository.list_descendants uses. Remaining string operators fall
     # back to a text cast so they at least behave predictably.
     if rule.property == "$path":
         if op == "beginsWith":
-            return col.op("<@")(str(value))
+            return path_contains(col, str(value), dialect_name)
         if op == "=":
             return col == str(value)
         if op in ("contains", "endsWith", "doesNotContain"):
@@ -143,7 +150,7 @@ def _compile_property(rule: PropertyRule) -> ColumnElement[bool]:
         key = META_ATTRIBUTE_ALIASES.get(rule.property, rule.property)
         if rule.property in META_PROPERTIES:
             raise QueryError(f"containsAny is not supported on {rule.property!r}")
-        return or_(*[NodeORM.attributes[key].astext.contains(str(v)) for v in value])
+        return or_(*[NodeORM.attributes[key].as_string().contains(str(v)) for v in value])
 
     if op in RANGE_OPERATORS:
         if not isinstance(value, list) or len(value) != 2:
@@ -237,15 +244,24 @@ async def _resolve_node_id(session: AsyncSession, value: str) -> UUID | None:
     return (await session.execute(stmt)).scalars().first()
 
 
-def compile_group(group: RuleGroup, relations: dict[int, set[UUID]]) -> ColumnElement[bool]:
-    """The rule tree as one SQLAlchemy boolean expression."""
+def compile_group(
+    group: RuleGroup, relations: dict[int, set[UUID]], dialect_name: str = "postgresql"
+) -> ColumnElement[bool]:
+    """The rule tree as one SQLAlchemy boolean expression.
+
+    `dialect_name` only matters for `$path beginsWith` (see
+    `persistence/dialect_compat.py`) — everything else here already
+    compiles identically on Postgres and SQLite. Defaults to
+    `"postgresql"` so existing callers/tests that don't pass it keep
+    today's behavior unchanged; still a pure function — a dialect name is
+    a string, not a session, so this doesn't touch a database."""
     if not group.rules:
         return true()
 
     clauses: list[ColumnElement[bool]] = []
     for rule in group.rules:
         if isinstance(rule, RuleGroup):
-            clauses.append(compile_group(rule, relations))
+            clauses.append(compile_group(rule, relations, dialect_name))
         elif isinstance(rule, RelationRule):
             ids = relations.get(id(rule), set())
             if not ids:
@@ -258,7 +274,7 @@ def compile_group(group: RuleGroup, relations: dict[int, set[UUID]]) -> ColumnEl
                 in_set = NodeORM.id.in_(ids)
                 clauses.append(in_set if rule.operator == "relatedTo" else not_(in_set))
         else:
-            clauses.append(_compile_property(rule))
+            clauses.append(_compile_property(rule, dialect_name))
 
     return and_(*clauses) if group.combinator == "and" else or_(*clauses)
 

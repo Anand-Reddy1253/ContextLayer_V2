@@ -43,6 +43,12 @@ _TEST_KINDS = "('TEST_CASE', 'TEST_SUITE', 'TEST_PLAN')"
 
 
 def upgrade() -> None:
+    # Postgres-only `DELETE ... USING` syntax, and moot on SQLite
+    # regardless: a fresh SQLite database reaching this migration was
+    # never synced by the pre-fix mapper that produced these inverted
+    # edges. Same reasoning as 0010-0013.
+    if op.get_bind().dialect.name == "sqlite":
+        return
     # Only the inverted direction: source is a work item, target is a test.
     op.execute(
         f"""

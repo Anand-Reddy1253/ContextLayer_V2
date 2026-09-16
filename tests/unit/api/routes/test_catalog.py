@@ -1,7 +1,7 @@
 """Unit tests for the pure helper functions behind GET /catalog/search-cards
 (docs/UI.md "Search") — no DB needed, so these run at the unit tier.
 `_score_match` and `_reachable_ids` are the two pieces of actual logic;
-`_locator_json` is the shape a downstream agent hands to a native
+`locator_json` is the shape a downstream agent hands to a native
 per-vendor MCP server.
 """
 
@@ -11,10 +11,10 @@ from uuid import uuid4
 from context_fabric.api.routes.catalog import (
     _business_context_for,
     _infer_kind_filter,
-    _locator_json,
-    _native_call_json,
     _reachable_ids,
     _score_match,
+    locator_json,
+    native_call_json,
 )
 from context_fabric.domain.enums import Layer
 from context_fabric.domain.node import Node
@@ -192,7 +192,7 @@ def test_score_match_vendor_description_outranks_llm_abstract_at_equal_match():
 
 def test_locator_json_pulls_identity_and_url_from_attributes():
     node = _node("SSO")
-    locator = _locator_json(node)
+    locator = locator_json(node)
     assert locator == {
         "source_system": "azure_devops",
         "source_instance_id": "ado-acme",
@@ -215,7 +215,7 @@ def test_native_call_json_azure_devops_extracts_project_guid_from_url():
             "url": "https://devonrepo.visualstudio.com/58eab199-102b-4961-869c-e6aa3a792b10/_apis/wit/workItems/182"
         },
     )
-    assert _native_call_json(node) == {
+    assert native_call_json(node) == {
         "tool": "wit_get_work_items_batch",
         "params": {"project": "58eab199-102b-4961-869c-e6aa3a792b10", "ids": ["182"]},
     }
@@ -225,7 +225,7 @@ def test_native_call_json_github_pull_request():
     node = _generic_node(
         source_system="github", kind="PULL_REQUEST", native_id="acme-org/identity-service#7"
     )
-    assert _native_call_json(node) == {
+    assert native_call_json(node) == {
         "tool": "get_pull_request",
         "params": {"owner": "acme-org", "repo": "identity-service", "pullNumber": 7},
     }
@@ -235,7 +235,7 @@ def test_native_call_json_github_issue():
     node = _generic_node(
         source_system="github", kind="ISSUE", native_id="acme-org/identity-service#3"
     )
-    assert _native_call_json(node) == {
+    assert native_call_json(node) == {
         "tool": "get_issue",
         "params": {"owner": "acme-org", "repo": "identity-service", "issue_number": 3},
     }
@@ -245,7 +245,7 @@ def test_native_call_json_github_file():
     node = _generic_node(
         source_system="github", kind="FILE", native_id="acme-org/identity-service@main:src/app.py"
     )
-    assert _native_call_json(node) == {
+    assert native_call_json(node) == {
         "tool": "get_file_contents",
         "params": {
             "owner": "acme-org",
@@ -260,12 +260,12 @@ def test_native_call_json_github_repository_returns_none():
     node = _generic_node(
         source_system="github", kind="REPOSITORY", native_id="acme-org/identity-service"
     )
-    assert _native_call_json(node) is None
+    assert native_call_json(node) is None
 
 
 def test_native_call_json_confluence_page():
     node = _generic_node(source_system="confluence", kind="PAGE", native_id="327898")
-    assert _native_call_json(node) == {
+    assert native_call_json(node) == {
         "tool": "getConfluencePage",
         "params": {"pageId": "327898"},
     }
@@ -273,7 +273,7 @@ def test_native_call_json_confluence_page():
 
 def test_native_call_json_jira_issue():
     node = _generic_node(source_system="jira", kind="BUG", native_id="TALENT-3")
-    assert _native_call_json(node) == {
+    assert native_call_json(node) == {
         "tool": "getJiraIssue",
         "params": {"issueIdOrKey": "TALENT-3"},
     }
@@ -286,7 +286,7 @@ def test_native_call_json_teams_message_with_channel_id():
         native_id="1700000000001",
         attributes={"channel_id": "19:identity-squad@thread.tacv2"},
     )
-    assert _native_call_json(node) == {
+    assert native_call_json(node) == {
         "tool": "get_channel_messages",
         "params": {"channelId": "19:identity-squad@thread.tacv2", "messageId": "1700000000001"},
     }
@@ -294,12 +294,43 @@ def test_native_call_json_teams_message_with_channel_id():
 
 def test_native_call_json_teams_message_without_channel_id_returns_none():
     node = _generic_node(source_system="teams", kind="MESSAGE", native_id="1700000000001")
-    assert _native_call_json(node) is None
+    assert native_call_json(node) is None
 
 
 def test_native_call_json_unknown_source_system_returns_none():
     node = _generic_node(source_system="unknown", kind="THING", native_id="1")
-    assert _native_call_json(node) is None
+    assert native_call_json(node) is None
+
+
+def test_native_call_json_azure_devops_non_work_item_kind_returns_none():
+    """A real bug this test guards against: the azure_devops branch used
+    to build a wit_get_work_items_batch call for ANY azure_devops node
+    with a url attribute, regardless of kind — an AI_ASSET, repo, wiki
+    page, or build all fell into it and got a fabricated, wrong call.
+    Gated on native_id being the bare-numeric work-item id shape now."""
+    node = _generic_node(
+        source_system="azure_devops",
+        kind="AI_ASSET",
+        native_id="3fa85f64-5717-4562-b3fc-2c963f66afa6:ai-asset:.claude/agents/reviewer.md",
+        attributes={"url": "https://dev.azure.com/acme/_apis/git/repositories/x"},
+    )
+    assert native_call_json(node) is None
+
+
+def test_native_call_json_github_ai_asset():
+    node = _generic_node(
+        source_system="github",
+        kind="AI_ASSET",
+        native_id="acme-org/identity-service:ai-asset:.github/agents/reviewer.agent.md",
+    )
+    assert native_call_json(node) == {
+        "tool": "get_file_contents",
+        "params": {
+            "owner": "acme-org",
+            "repo": "identity-service",
+            "path": ".github/agents/reviewer.agent.md",
+        },
+    }
 
 
 def _edge(src: str, dst: str, edge_type: str) -> dict:

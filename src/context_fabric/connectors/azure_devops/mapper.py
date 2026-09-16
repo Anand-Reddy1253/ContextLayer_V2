@@ -13,6 +13,24 @@ import json
 import re
 from typing import Any
 
+from context_fabric.connectors.ai_assets import (
+    AI_ASSET_PATH_RULES as AI_ASSET_PATH_RULES,
+)
+from context_fabric.connectors.ai_assets import (
+    ai_asset_native_id as ai_asset_native_id,
+)
+from context_fabric.connectors.ai_assets import (
+    classify_ai_asset_path as classify_ai_asset_path,
+)
+from context_fabric.connectors.ai_assets import (
+    map_ai_asset as map_ai_asset,
+)
+from context_fabric.connectors.ai_assets import (
+    parse_ai_asset_description as parse_ai_asset_description,
+)
+from context_fabric.connectors.ai_assets import (
+    parse_ai_asset_ref as parse_ai_asset_ref,
+)
 from context_fabric.connectors.cross_references import extract_cross_references
 from context_fabric.domain.connector_types import (
     ACLReference,
