@@ -346,8 +346,8 @@ function DetailPanel({ node, onSelect }: { node: CatalogNode; onSelect: (id: str
           {graphQuery.data && (
             <>
               <div className="mb-2 text-xs text-neutral-500">
-                {graphQuery.data.nodes.length} nodes · {graphQuery.data.edges.length} edges in this
-                subtree.
+                {graphQuery.data.nodes.length} nodes · {graphQuery.data.edges.length} edges — this
+                node's subtree plus anything cross-referenced from it, even across vendors.
               </div>
               <GraphView graph={graphQuery.data} rootId={node.id} onSelectNode={onSelect} />
             </>
@@ -429,6 +429,7 @@ export function CatalogExplorerPage() {
           <option value="azure_devops">azure_devops</option>
           <option value="github">github</option>
           <option value="confluence">confluence</option>
+          <option value="jira">jira</option>
         </select>
         <select
           value={kind}

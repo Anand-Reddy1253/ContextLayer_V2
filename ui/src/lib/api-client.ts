@@ -71,6 +71,12 @@ export interface CatalogEdge {
   state: string;
   confidence: number | null;
   evidence: string | null;
+  // Optional — SearchPage.tsx synthesizes a few CatalogEdge literals
+  // client-side (CONTAINS/BINDS) with no `attributes` (a pre-existing gap
+  // shared with `evidence` there); ProposedLinksPage.tsx, which actually
+  // reads this for LLM-inferred edges (ADR-011), always has a real one
+  // from the API and uses optional chaining regardless.
+  attributes?: Record<string, unknown>;
 }
 
 export interface ProposedEdge {
@@ -189,6 +195,28 @@ export interface ReconcileResult {
   }[];
 }
 
+export interface WorkflowStep {
+  id: string;
+  workflow_template_id: string;
+  order: number;
+  source_system: string;
+  source_instance_id: string;
+  native_id: string;
+  label: string;
+  vendor: string;
+  asset_type: string;
+  instructions: string | null;
+}
+
+export interface WorkflowTemplate {
+  id: string;
+  context_space_id: string;
+  name: string;
+  description: string;
+  status: string;
+  steps: WorkflowStep[];
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`/api${path}`, {
     ...init,
@@ -292,6 +320,16 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ dst_node_id: dstNodeId }),
     }),
+  bulkConfirmProposedEdges: (edgeIds: string[]) =>
+    request<{ confirmed: number; edges: CatalogEdge[] }>("/catalog/edges/bulk-confirm", {
+      method: "POST",
+      body: JSON.stringify({ edge_ids: edgeIds }),
+    }),
+  bulkRejectProposedEdges: (edgeIds: string[]) =>
+    request<{ rejected: number; edges: CatalogEdge[] }>("/catalog/edges/bulk-reject", {
+      method: "POST",
+      body: JSON.stringify({ edge_ids: edgeIds }),
+    }),
   getNodeGraph: (nodeId: string) => request<CatalogGraph>(`/catalog/nodes/${nodeId}/graph`),
   getEnterpriseGraph: () => request<CatalogGraph>("/catalog/enterprise-graph"),
   searchCards: (params: {
@@ -367,4 +405,44 @@ export const api = {
     request<ReconcileResult>(`/context-spaces/${encodeURIComponent(contextSpaceId)}/reconcile`),
   deleteContextSpace: (contextSpaceId: string) =>
     request<void>(`/context-spaces/${encodeURIComponent(contextSpaceId)}`, { method: "DELETE" }),
+
+  listWorkflowTemplates: (contextSpaceId?: string) => {
+    const qs = contextSpaceId
+      ? `?context_space_id=${encodeURIComponent(contextSpaceId)}`
+      : "";
+    return request<WorkflowTemplate[]>(`/workflow-templates${qs}`);
+  },
+  getWorkflowTemplate: (templateId: string) =>
+    request<WorkflowTemplate>(`/workflow-templates/${templateId}`),
+  createWorkflowTemplate: (body: {
+    context_space_id: string;
+    name: string;
+    description?: string;
+  }) =>
+    request<WorkflowTemplate>("/workflow-templates", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  deleteWorkflowTemplate: (templateId: string) =>
+    request<void>(`/workflow-templates/${templateId}`, { method: "DELETE" }),
+  addWorkflowStep: (
+    templateId: string,
+    body: {
+      source_system: string;
+      source_instance_id: string;
+      native_id: string;
+      instructions?: string | null;
+    }
+  ) =>
+    request<WorkflowStep>(`/workflow-templates/${templateId}/steps`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  removeWorkflowStep: (templateId: string, stepId: string) =>
+    request<void>(`/workflow-templates/${templateId}/steps/${stepId}`, { method: "DELETE" }),
+  reorderWorkflowSteps: (templateId: string, stepIds: string[]) =>
+    request<WorkflowStep[]>(`/workflow-templates/${templateId}/steps/reorder`, {
+      method: "POST",
+      body: JSON.stringify({ step_ids: stepIds }),
+    }),
 };

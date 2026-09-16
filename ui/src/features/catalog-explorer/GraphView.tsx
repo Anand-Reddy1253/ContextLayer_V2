@@ -37,6 +37,33 @@ const KIND_COLOR: Record<string, string> = {
 };
 const DEFAULT_COLOR = "#94a3b8";
 
+// One color per vendor, for "color by system" mode — a real user ask:
+// coloring by kind (STORY vs. PULL_REQUEST vs. PAGE) makes same-kind
+// nodes easy to spot but says nothing about which vendor a node came
+// from, which is exactly what matters when the question is "does this
+// relationship actually cross systems." Picked for maximum contrast
+// against each other and against KIND_COLOR's cooler blues/purples, not
+// for brand fidelity.
+const SOURCE_SYSTEM_COLOR: Record<string, string> = {
+  azure_devops: "#0078D4",
+  github: "#7c3aed",
+  jira: "#16a34a",
+  confluence: "#ea580c",
+  teams: "#0ea5e9",
+};
+const SOURCE_SYSTEM_LABELS: Record<string, string> = {
+  azure_devops: "Azure DevOps",
+  github: "GitHub",
+  jira: "Jira",
+  confluence: "Confluence",
+  teams: "Teams",
+};
+// Business/logical-layer nodes (a team, a context space, the synthesized
+// "bound to" node search draws) carry no source_system at all — they
+// aren't vendor data, so they get their own neutral color rather than
+// falling into DEFAULT_COLOR and looking like an unrecognized kind.
+const NO_SOURCE_SYSTEM_COLOR = "#0f172a";
+
 const EDGE_COLOR: Record<string, string> = {
   CONTAINS: "#cbd5e1",
   MENTIONS: "#f59e0b",
@@ -57,6 +84,16 @@ function kindLabel(kind: string): string {
     .join(" ");
 }
 
+// A node label sits directly under a circle that can be as small as 10px
+// across — an unbounded name would overlap its neighbors and make the
+// labeled version no more readable than the unlabeled one it's replacing.
+// Truncated here (not via a CSS text-overflow, which cytoscape's canvas
+// renderer doesn't support) so the raw string cytoscape lays out is
+// already short.
+function truncateLabel(text: string, max = 22): string {
+  return text.length > max ? `${text.slice(0, max - 1)}…` : text;
+}
+
 // Above this many same-kind siblings under one parent, draw one collapsed
 // cluster node instead of every individual child — found via a real user
 // report: ~140 Pull Requests all sharing one repo parent rendered as a
@@ -72,15 +109,28 @@ interface ClusterInfo {
   parentId: string;
   kind: string;
   memberIds: string[];
+  sourceSystem: string | null;
 }
 
-function buildStylesheet(rootId?: string): cytoscape.StylesheetCSS[] {
-  const kindStyles: cytoscape.StylesheetCSS[] = Object.entries(KIND_COLOR).map(
-    ([kind, color]) => ({
-      selector: `node[kind = "${kind}"]`,
-      css: { "background-color": color },
-    })
-  );
+type ColorMode = "kind" | "system";
+
+function buildStylesheet(rootId?: string, colorBy: ColorMode = "kind"): cytoscape.StylesheetCSS[] {
+  const nodeColorStyles: cytoscape.StylesheetCSS[] =
+    colorBy === "system"
+      ? [
+          ...Object.entries(SOURCE_SYSTEM_COLOR).map(([system, color]) => ({
+            selector: `node[sourceSystem = "${system}"]`,
+            css: { "background-color": color },
+          })),
+          {
+            selector: 'node[sourceSystem = ""]',
+            css: { "background-color": NO_SOURCE_SYSTEM_COLOR },
+          },
+        ]
+      : Object.entries(KIND_COLOR).map(([kind, color]) => ({
+          selector: `node[kind = "${kind}"]`,
+          css: { "background-color": color },
+        }));
   const edgeStyles: cytoscape.StylesheetCSS[] = Object.entries(EDGE_COLOR).map(
     ([type, color]) => ({
       selector: `edge[type = "${type}"]`,
@@ -96,9 +146,18 @@ function buildStylesheet(rootId?: string): cytoscape.StylesheetCSS[] {
         height: "data(size)",
         "border-width": 1,
         "border-color": "#ffffff",
-      },
+        label: "data(label)",
+        "font-size": 8,
+        "text-valign": "bottom",
+        "text-halign": "center",
+        "text-margin-y": 3,
+        color: "#334155",
+        "text-background-color": "#ffffff",
+        "text-background-opacity": 1,
+        "text-background-padding": "2px",
+      } as cytoscape.Css.Node,
     },
-    ...kindStyles,
+    ...nodeColorStyles,
     {
       selector: "edge",
       css: {
@@ -113,7 +172,18 @@ function buildStylesheet(rootId?: string): cytoscape.StylesheetCSS[] {
     ...edgeStyles,
     {
       selector: 'edge[type != "CONTAINS"]',
-      css: { "line-style": "dashed", opacity: 0.8, "target-arrow-shape": "triangle" },
+      css: {
+        "line-style": "dashed",
+        opacity: 0.8,
+        "target-arrow-shape": "triangle",
+        label: "data(label)",
+        "font-size": 7,
+        "text-rotation": "autorotate",
+        color: "#334155",
+        "text-background-color": "#ffffff",
+        "text-background-opacity": 1,
+        "text-background-padding": "2px",
+      } as cytoscape.Css.Edge,
     },
     ...(rootId
       ? [
@@ -137,23 +207,70 @@ function buildStylesheet(rootId?: string): cytoscape.StylesheetCSS[] {
         "border-style": "dashed",
       },
     },
+    // Click-a-node-to-highlight-its-neighborhood (docs/UI.md "Graph
+    // views"): clicking fades everything else instead of just selecting
+    // the node, so "what's connected to this" is visible at a glance on
+    // a dense graph without hunting for thin lines. `.faded` is applied
+    // after the kind/edge-type rules above on purpose — later rules win
+    // ties in cytoscape's stylesheet, so this reliably dims a highlighted
+    // node's own kind color too, not just the default.
+    {
+      selector: ".faded",
+      css: { opacity: 0.12 },
+    },
+    {
+      selector: "node.highlighted",
+      css: { "border-width": 3, "border-color": "#0f172a", opacity: 1 },
+    },
+    {
+      selector: "edge.highlighted",
+      css: { opacity: 1, width: 2.5, "target-arrow-shape": "triangle" },
+    },
   ];
 }
+
+type LayoutMode = "auto" | "circular" | "tree" | "force";
+
+const LAYOUT_LABELS: Record<LayoutMode, string> = {
+  auto: "Auto",
+  circular: "Circular",
+  tree: "Tree",
+  force: "Force",
+};
 
 export function GraphView({
   graph,
   rootId,
   onSelectNode,
+  defaultLayout = "auto",
 }: {
   graph: CatalogGraph;
   rootId?: string;
   onSelectNode: (nodeId: string) => void;
+  /** Which layout to start on — "auto" picks tree vs. force per-graph
+   * (see the isHierarchyShaped heuristic below); a caller with a strong
+   * opinion (Enterprise Graph defaults to "circular") can override it.
+   * The user can always switch via the on-canvas toggle regardless. */
+  defaultLayout?: LayoutMode;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const cyRef = useRef<cytoscape.Core | null>(null);
   const [hovered, setHovered] = useState<CatalogNode | null>(null);
   const [hiddenKinds, setHiddenKinds] = useState<Set<string>>(new Set());
   const [expandedClusters, setExpandedClusters] = useState<Set<string>>(new Set());
+  const [layoutMode, setLayoutMode] = useState<LayoutMode>(defaultLayout);
+  // A real user ask: rather than click every "N × Kind" box one at a
+  // time to confirm what's actually in it, show every node individually
+  // up front. Grouping stays the default (a real screen fills up fast —
+  // one graph here had 101 same-parent Pull Requests) but is one click
+  // away from fully off.
+  const [groupingEnabled, setGroupingEnabled] = useState(true);
+  // A real user ask: "I just want to see the relationship between cross
+  // system[s] — can you color each system with a color?" Kind-coloring
+  // (the default) distinguishes a STORY from a PULL_REQUEST but says
+  // nothing about which vendor a node came from, which is exactly what
+  // matters when the question is "does this edge actually cross vendors."
+  const [colorMode, setColorMode] = useState<ColorMode>("kind");
 
   // Recomputed whenever the underlying graph changes, not on every
   // expand/collapse click — a fresh graph should always start collapsed.
@@ -180,14 +297,22 @@ export function GraphView({
       const key = `${n.parent_id}::${n.kind}`;
       let group = siblingGroups.get(key);
       if (!group) {
-        group = { id: `cluster:${key}`, parentId: n.parent_id, kind: n.kind, memberIds: [] };
+        group = {
+          id: `cluster:${key}`,
+          parentId: n.parent_id,
+          kind: n.kind,
+          memberIds: [],
+          sourceSystem: n.source_system,
+        };
         siblingGroups.set(key, group);
       }
       group.memberIds.push(n.id);
     }
-    const clusters = Array.from(siblingGroups.values()).filter(
-      (g) => g.memberIds.length > CLUSTER_THRESHOLD && !expandedClusters.has(g.id)
-    );
+    const clusters = groupingEnabled
+      ? Array.from(siblingGroups.values()).filter(
+          (g) => g.memberIds.length > CLUSTER_THRESHOLD && !expandedClusters.has(g.id)
+        )
+      : [];
     const collapsedMemberOf = new Map<string, ClusterInfo>();
     for (const cluster of clusters) {
       for (const memberId of cluster.memberIds) {
@@ -204,7 +329,7 @@ export function GraphView({
         capability: null,
         name: `${cluster.memberIds.length} × ${kindLabel(cluster.kind)} — click to expand`,
         description: null,
-        source_system: null,
+        source_system: cluster.sourceSystem,
         source_instance_id: null,
         native_id: null,
         parent_id: cluster.parentId,
@@ -223,12 +348,29 @@ export function GraphView({
       ...visibleNodes.map((n) => {
         const d = degree.get(n.id) ?? 0;
         const size = Math.min(60, Math.max(10, 8 + Math.sqrt(d) * 6));
-        return { data: { id: n.id, kind: n.kind, size } };
+        return {
+          data: {
+            id: n.id,
+            kind: n.kind,
+            size,
+            label: truncateLabel(n.name),
+            sourceSystem: n.source_system ?? "",
+          },
+        };
       }),
       ...clusters.map((cluster) => {
         const totalDegree = cluster.memberIds.reduce((sum, id) => sum + (degree.get(id) ?? 0), 0);
         const size = Math.min(60, Math.max(14, 8 + Math.sqrt(totalDegree) * 6));
-        return { data: { id: cluster.id, kind: cluster.kind, size }, classes: "cluster" };
+        return {
+          data: {
+            id: cluster.id,
+            kind: cluster.kind,
+            size,
+            label: truncateLabel(`${cluster.memberIds.length} × ${kindLabel(cluster.kind)}`),
+            sourceSystem: cluster.sourceSystem ?? "",
+          },
+          classes: "cluster",
+        };
       }),
       ...clusters.map((cluster) => ({
         data: {
@@ -246,7 +388,18 @@ export function GraphView({
       ...graph.edges
         .filter((e) => !collapsedMemberOf.has(e.src_id) && !collapsedMemberOf.has(e.dst_id))
         .map((e) => ({
-          data: { id: e.id, source: e.src_id, target: e.dst_id, type: e.type },
+          data: {
+            id: e.id,
+            source: e.src_id,
+            target: e.dst_id,
+            type: e.type,
+            // CONTAINS is the tree backbone — every parent/child pair has
+            // one, so labeling it would repeat "contains" on nearly every
+            // line in the graph. Its solid-line-vs-dashed distinction
+            // (buildStylesheet) already says "this is containment"
+            // without needing the word written out.
+            label: e.type === "CONTAINS" ? "" : edgeLabel(e.type),
+          },
         })),
     ];
 
@@ -261,39 +414,115 @@ export function GraphView({
     // needing a hard cutover to `breadthfirst`'s tree look.
     const effectiveCount = visibleNodes.length + clusters.length;
     const isVeryLarge = effectiveCount > 350;
-    const layout: cytoscape.LayoutOptions = isVeryLarge
-      ? ({
-          name: "breadthfirst",
-          directed: true,
-          roots: rootId ? [rootId] : undefined,
-          spacingFactor: 0.9,
-          animate: false,
-        } as cytoscape.LayoutOptions)
-      : ({
-          name: "cose",
-          animate: false,
-          nodeRepulsion: () => 6000,
-          idealEdgeLength: () => 50,
-          gravity: 40,
-          numIter: effectiveCount > 150 ? 400 : 1000,
-        } as cytoscape.LayoutOptions);
+
+    // A real user report: a topic search graph (a handful of matches,
+    // their ancestor chains, and their cross-links) came back with 50+
+    // real nodes but only ~7 were visually distinguishable — the rest
+    // were low-degree "leaf" nodes (a single edge to one shared hub, e.g.
+    // every card's own PROJECT ancestor) that `cose`'s old repulsion
+    // constants weren't strong enough to keep from overlapping directly
+    // on top of each other. Stronger separation fixes that regardless of
+    // layout algorithm.
+    const edgeElements = elements.filter(
+      (el): el is { data: { id: string; source: string; target: string; type: string } } =>
+        "source" in el.data
+    );
+    const containsEdgeCount = edgeElements.filter((el) => el.data.type === "CONTAINS").length;
+    const containsRatio = edgeElements.length > 0 ? containsEdgeCount / edgeElements.length : 1;
+    // A second, separate real user report: even where the layout wasn't
+    // overlapping, `cose` still doesn't know CONTAINS means "parent of" —
+    // it just treats every edge as an equal attraction force, so a small
+    // clean hierarchy (a team, its context space, a couple of repos) came
+    // out as an undirected clump instead of a tree. When most of a
+    // graph's edges really are CONTAINS, a directed tree layout is both
+    // more legible *and* guarantees no two nodes share a position — the
+    // BFS grid gives every node its own cell.
+    const isHierarchyShaped = !isVeryLarge && containsRatio >= 0.6;
+    let hierarchyRoots: string[] | undefined;
+    if (isHierarchyShaped) {
+      const hasIncomingContains = new Set(
+        edgeElements.filter((el) => el.data.type === "CONTAINS").map((el) => el.data.target)
+      );
+      const allNodeIds = elements
+        .filter((el) => !("source" in el.data))
+        .map((el) => el.data.id as string);
+      const roots = allNodeIds.filter((id) => !hasIncomingContains.has(id));
+      hierarchyRoots = roots.length > 0 ? roots : undefined;
+    }
+
+    const treeLayout: cytoscape.LayoutOptions = {
+      name: "breadthfirst",
+      directed: true,
+      roots: hierarchyRoots ?? (rootId ? [rootId] : undefined),
+      spacingFactor: isVeryLarge ? 0.9 : 1.4,
+      animate: false,
+    } as cytoscape.LayoutOptions;
+    const forceLayout: cytoscape.LayoutOptions = {
+      name: "cose",
+      animate: false,
+      nodeRepulsion: () => 16000,
+      idealEdgeLength: () => 80,
+      nodeOverlap: 24,
+      gravity: 40,
+      numIter: effectiveCount > 150 ? 400 : 1000,
+    } as cytoscape.LayoutOptions;
+    // Concentric rings by degree (the most-connected nodes end up in the
+    // center) — a real user report that the Enterprise Graph "still looks
+    // like a tree" even after the hierarchy-aware breadthfirst fix above:
+    // a tree reads as containment, but for a whole-org overview a radial
+    // layout communicates "this is one interconnected web," not "a
+    // reporting chain," which is closer to what that page is actually
+    // showing (business structure *and* cross-vendor links together).
+    const circularLayout: cytoscape.LayoutOptions = {
+      name: "concentric",
+      concentric: (node: cytoscape.NodeSingular) => node.degree(),
+      levelWidth: () => 1,
+      minNodeSpacing: isVeryLarge ? 20 : 40,
+      animate: false,
+    } as cytoscape.LayoutOptions;
+
+    const layout: cytoscape.LayoutOptions =
+      layoutMode === "circular"
+        ? circularLayout
+        : layoutMode === "tree"
+          ? treeLayout
+          : layoutMode === "force"
+            ? forceLayout
+            : isVeryLarge || isHierarchyShaped
+              ? treeLayout
+              : forceLayout;
 
     const cy = cytoscape({
       container: containerRef.current,
       elements,
-      style: buildStylesheet(rootId),
+      style: buildStylesheet(rootId, colorMode),
       layout,
       minZoom: 0.1,
       maxZoom: 4,
     });
 
+    // Click a node to highlight its immediate neighborhood (itself, its
+    // direct edges, and whatever's on the other end of them) and fade
+    // everything else — a real user ask: "when I click a node, the nodes
+    // related to it should be highlighted." Clicking empty canvas clears
+    // it. Cluster nodes keep their existing expand-on-click behavior
+    // instead (highlighting a "12 × Story" placeholder isn't useful).
     cy.on("tap", "node", (evt) => {
-      const id = evt.target.id();
+      const target = evt.target;
+      const id = target.id();
       if (id.startsWith("cluster:")) {
         setExpandedClusters((prev) => new Set(prev).add(id));
         return;
       }
+      const neighborhood = target.closedNeighborhood();
+      cy.elements().removeClass("highlighted").addClass("faded");
+      neighborhood.removeClass("faded").addClass("highlighted");
       onSelectNode(id);
+    });
+    cy.on("tap", (evt) => {
+      if (evt.target === cy) {
+        cy.elements().removeClass("faded highlighted");
+      }
     });
     cy.on("mouseover", "node", (evt) => {
       evt.target.addClass("hovered");
@@ -309,7 +538,7 @@ export function GraphView({
       cyRef.current = null;
       cy.destroy();
     };
-  }, [graph, rootId, onSelectNode, expandedClusters]);
+  }, [graph, rootId, onSelectNode, expandedClusters, layoutMode, groupingEnabled, colorMode]);
 
   useEffect(() => {
     const cy = cyRef.current;
@@ -331,10 +560,50 @@ export function GraphView({
 
   const kindsPresent = Array.from(new Set(graph.nodes.map((n) => n.kind))).sort();
   const edgeTypesPresent = Array.from(new Set(graph.edges.map((e) => e.type))).sort();
+  const systemsPresent = Array.from(new Set(graph.nodes.map((n) => n.source_system ?? ""))).sort();
 
   return (
     <div className="flex gap-3">
       <div className="flex-1">
+        <div className="mb-2 flex flex-wrap items-center gap-3 text-xs">
+          <span className="flex items-center gap-1.5">
+            <span className="text-neutral-400">Layout:</span>
+            {(Object.keys(LAYOUT_LABELS) as LayoutMode[]).map((mode) => (
+              <button
+                key={mode}
+                onClick={() => setLayoutMode(mode)}
+                className={`rounded px-2 py-0.5 ${
+                  layoutMode === mode ? "bg-neutral-900 text-white" : "bg-neutral-100 text-neutral-600"
+                }`}
+              >
+                {LAYOUT_LABELS[mode]}
+              </button>
+            ))}
+          </span>
+          <button
+            onClick={() => setGroupingEnabled((v) => !v)}
+            className={`rounded px-2 py-0.5 ${
+              groupingEnabled ? "bg-neutral-100 text-neutral-600" : "bg-neutral-900 text-white"
+            }`}
+            title='Large same-kind sibling groups (e.g. "32 × Task") collapse into one box by default — turn off to always show every node individually.'
+          >
+            {groupingEnabled ? "Group large sets" : "Showing all individually"}
+          </button>
+          <span className="flex items-center gap-1.5">
+            <span className="text-neutral-400">Color by:</span>
+            {(["kind", "system"] as ColorMode[]).map((mode) => (
+              <button
+                key={mode}
+                onClick={() => setColorMode(mode)}
+                className={`rounded px-2 py-0.5 ${
+                  colorMode === mode ? "bg-neutral-900 text-white" : "bg-neutral-100 text-neutral-600"
+                }`}
+              >
+                {mode === "kind" ? "Kind" : "System"}
+              </button>
+            ))}
+          </span>
+        </div>
         <div className="relative">
           <div ref={containerRef} className="h-[520px] w-full rounded border border-neutral-200 bg-white" />
           <div className="pointer-events-none absolute bottom-2 left-2 rounded bg-white/90 px-2 py-1 text-xs text-neutral-700 shadow">
@@ -343,7 +612,10 @@ export function GraphView({
                 <span className="font-medium">{hovered.kind}</span>: {hovered.name}
               </>
             ) : (
-              <span className="text-neutral-400">Hover a node for its name · click to open · scroll to zoom</span>
+              <span className="text-neutral-400">
+                Hover for a name · click to highlight its connections (click empty space to clear)
+                · scroll to zoom
+              </span>
             )}
           </div>
         </div>
@@ -365,6 +637,24 @@ export function GraphView({
             );
           })}
         </div>
+        {colorMode === "system" && (
+          <div className="mt-2 flex flex-wrap gap-3 text-xs text-neutral-500">
+            {systemsPresent.map((system) => (
+              <span key={system} className="flex items-center gap-1.5">
+                <span
+                  className="inline-block h-2.5 w-2.5 rounded-full"
+                  style={{
+                    backgroundColor:
+                      system === ""
+                        ? NO_SOURCE_SYSTEM_COLOR
+                        : (SOURCE_SYSTEM_COLOR[system] ?? DEFAULT_COLOR),
+                  }}
+                />
+                {system === "" ? "Business / logical" : (SOURCE_SYSTEM_LABELS[system] ?? system)}
+              </span>
+            ))}
+          </div>
+        )}
       </div>
       <div className="w-44 shrink-0 rounded border border-neutral-200 p-2">
         <div className="mb-1 flex items-center justify-between text-xs font-medium text-neutral-500">

@@ -108,7 +108,12 @@ export function EnterpriseGraphPage() {
               context space has no resolved bindings.
             </div>
           )}
-          <GraphView key={scopeNodeId} graph={displayedGraph} onSelectNode={setSelectedId} />
+          <GraphView
+            key={scopeNodeId}
+            graph={displayedGraph}
+            onSelectNode={setSelectedId}
+            defaultLayout="force"
+          />
         </>
       )}
 

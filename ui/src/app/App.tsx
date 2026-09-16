@@ -8,6 +8,7 @@ import { EnterpriseGraphPage } from "@/features/enterprise-graph/EnterpriseGraph
 import { SearchPage } from "@/features/search/SearchPage";
 import { AiExplorerPage } from "@/features/ai-explorer/AiExplorerPage";
 import { ProposedLinksPage } from "@/features/proposed-links/ProposedLinksPage";
+import { WorkflowTemplatesPage } from "@/features/workflow-templates/WorkflowTemplatesPage";
 
 const queryClient = new QueryClient();
 
@@ -35,6 +36,7 @@ function Shell() {
           <NavLink to="/search" label="Search" />
           <NavLink to="/business" label="Business Hierarchy" />
           <NavLink to="/context-spaces" label="Team Contexts" />
+          <NavLink to="/workflow-templates" label="Workflow Templates" />
           <NavLink to="/connectors" label="Connectors" />
           <NavLink to="/catalog" label="Asset Catalog" />
           <NavLink to="/ai-explorer" label="AI Explorer" />
@@ -48,6 +50,7 @@ function Shell() {
           <Route path="/search" element={<SearchPage />} />
           <Route path="/business" element={<BusinessTreePage />} />
           <Route path="/context-spaces" element={<ContextSpacesPage />} />
+          <Route path="/workflow-templates" element={<WorkflowTemplatesPage />} />
           <Route path="/connectors" element={<ConnectorsPage />} />
           <Route path="/catalog" element={<CatalogExplorerPage />} />
           <Route path="/ai-explorer" element={<AiExplorerPage />} />
