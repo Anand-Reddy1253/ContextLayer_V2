@@ -164,6 +164,47 @@ produce it.
     {"property":"state","operator":"=","value":"Approved"}]}]}
 ```
 
+## Finding what's available to run for a task (harness composition)
+
+Context Fabric never executes anything — it only answers "what's there and
+where." A harness (you, running a task) composes two calls to go from a
+task reference to a runnable agent/skill definition:
+
+**1. Resolve scope** — which repo/team/product a task belongs to:
+
+```
+resolve_scope(task_ref="AB#312", actor_id="you")
+→ {"resolved": true, "product": "talentflow", "teams": ["identity-squad"],
+   "repositories": ["acme-org/identity-service"], ...}
+```
+
+`task_ref` accepts an Azure DevOps ref (`AB#312`), a Jira key
+(`TALENT-42`), a GitHub issue/PR ref (`owner/repo#7`), or a Confluence page
+ref (`CONFPAGE-98765`). A task_ref that was never synced, or has no
+covering context-space binding, comes back `resolved: false` with a
+`reason` — check it before assuming `repositories` is usable.
+
+**2. Search for AI assets in that scope** — agent/skill/rule definitions a
+repository declares (`.github/agents/`, `.claude/skills/`, `.cursor/rules/`,
+etc. — GitHub and Azure DevOps repos both get scanned for these when their
+connection has the `ai_assets` entity type enabled):
+
+```
+search_entities(query='{"combinator":"and","rules":[
+  {"property":"$blueprint","operator":"=","value":"AI_ASSET"},
+  {"property":"$path","operator":"beginsWith","value":"<repository path>"}]}')
+```
+
+Each result's `locator` names the vendor and the asset's own path
+(`attributes.vendor`, `attributes.asset_type` — agent/skill/prompt/rule/
+command). To actually run one, fetch its full definition via that
+connector's own on-demand content locator (not stored in the catalog —
+ADR-003), then execute it yourself; Context Fabric holds no write path and
+never runs an agent on a caller's behalf.
+
+This is the same two-call "resolve scope, then query within it" shape as
+any other scoped question — nothing here is a special "workflow" endpoint.
+
 ## Known limits — say so rather than inventing
 
 - **No cross-tool links yet.** PR → work item edges do not exist in this

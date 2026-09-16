@@ -111,6 +111,34 @@ Each container and object gets a unique `native_id` and, where the source
 provides one, a description — both preserved in the mapped `Node`
 (`attributes`/`description` fields, `docs/DOMAIN_MODEL.md`).
 
+## AI Explorer (`ai_assets` entity type)
+
+GitHub and Azure DevOps connections can both opt into an `ai_assets` entity
+type: a scan of each repository for agent/skill/rule/command definitions a
+team has checked in for a coding assistant to use —
+`.github/agents|skills|prompts/`, `.claude/agents|skills|commands/`,
+`.cursor/rules/`. Each recognized markdown file becomes an `AI_ASSET` node
+(`attributes.vendor`, `attributes.asset_type`, `attributes.path`), parented
+under its repository, with `name`/`description` read from the file's own
+YAML frontmatter (or its first line, as a fallback) — never the full body
+(ADR-003). The full definition is fetched on demand via `get_content()`,
+same as every other on-demand content path.
+
+The classification logic (`AI_ASSET_PATH_RULES`, `classify_ai_asset_path`,
+`parse_ai_asset_description`) and the `native_id` encoding
+(`ai_asset_native_id`/`parse_ai_asset_ref`, a `"{container}:ai-asset:{path}"`
+marker scheme that works whether the container id is GitHub's `owner/repo`
+or an ADO repo's GUID) live in `connectors/ai_assets.py`, shared by both
+connectors rather than duplicated — only the tree-fetch mechanics differ
+(GitHub's git-trees API vs. ADO's Git Items API), and those stay in each
+connector's own `live.py`. Fixture mode does not seed AI assets for either
+connector.
+
+This is the mechanism a harness (docs/MCP.md's `resolve_scope`) uses to
+learn what agents/skills are available to run in a resolved repository —
+see `.claude/skills/context-fabric-query/SKILL.md`'s "harness composition"
+section for the worked example.
+
 ## LLM-generated search metadata (Confluence)
 
 Confluence `PAGE` nodes carry no vendor-supplied `description` (the v2 API

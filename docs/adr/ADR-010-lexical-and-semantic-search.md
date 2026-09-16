@@ -92,3 +92,19 @@ installing anyway, and nothing about the `/search-cards?semantic=true`
 contract would need to change if it's swapped in later — only this one
 module. Still additive/opt-in, still hybrid RRF, still never touching
 `get_context_pack` — the "how" changed, not the "what" or "why."
+
+## Amendment: dual-backend support (SQLite alongside Postgres)
+
+SQLite is now also a supported `CF_DATABASE_URL` backend, for zero-install
+local/demo use (Postgres stays primary/production — see
+`persistence/dialect_compat.py` and the migration files' `dialect.name`
+branches for the mechanics). Everything in this ADR ports cleanly except
+one piece: the `pg_trgm`-based typo-tolerance tier in `_score_match`
+(`api/routes/catalog.py`) has no SQLite equivalent short of a from-scratch
+FTS5 rewrite, which wasn't built. On SQLite, that SQL-side trigram
+candidate-widening is skipped; the Python-side `SequenceMatcher` fuzzy tier
+still runs, just over whatever the plain ILIKE fetched, so a badly
+misspelled single-word query may surface fewer candidates there than on
+Postgres. Semantic search itself is unaffected either way — it was already
+pgvector-free, per the amendment above, so nothing about it is
+Postgres-specific to begin with.
