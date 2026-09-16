@@ -1,0 +1,4 @@
+# Shell scripts run inside Linux containers (Dockerfile) — a CRLF shebang
+# ("#!/bin/sh\r") is not a valid interpreter path, so these must always
+# check out with LF regardless of a cloning machine's core.autocrlf.
+*.sh text eol=lf

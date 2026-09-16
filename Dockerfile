@@ -16,7 +16,11 @@ RUN pip install --no-cache-dir -e ".[dev]"
 COPY configs ./configs
 COPY fixtures ./fixtures
 COPY migrations ./migrations
+COPY alembic.ini ./
+COPY scripts/docker-entrypoint.sh ./scripts/docker-entrypoint.sh
+RUN chmod +x scripts/docker-entrypoint.sh
 
 EXPOSE 8000 8100
 
+ENTRYPOINT ["./scripts/docker-entrypoint.sh"]
 CMD ["uvicorn", "context_fabric.main:app", "--host", "0.0.0.0", "--port", "8000"]

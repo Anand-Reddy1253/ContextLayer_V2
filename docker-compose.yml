@@ -35,6 +35,24 @@ services:
       - ./fixtures:/app/fixtures
       - ./migrations:/app/migrations
 
+  # Optional — LLM enrichment (search abstracts/embeddings, ADR-011
+  # relationship extraction) degrades to a no-op per document/page when no
+  # Ollama is reachable, so this is never a hard dependency of `api`. Not
+  # started by a plain `docker compose up`; opt in with
+  # `docker compose --profile llm up -d`. Point CF_OLLAMA_BASE_URL (.env)
+  # at `http://ollama:11434` to use this service, or leave it as
+  # `http://localhost:11434`/some other reachable host to use an Ollama
+  # you already run yourself instead — either way, `api` only ever uses
+  # whatever CF_OLLAMA_BASE_URL resolves, and simply does without if
+  # nothing answers there.
+  ollama:
+    image: ollama/ollama:latest
+    profiles: ["llm"]
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+
   # Runs the UI dev server inside a container so a host Node install is not
   # required. Not part of the production image — see docs/UI.md for the
   # production build (static bundle served by the api image).
@@ -53,3 +71,4 @@ services:
 volumes:
   pgdata:
   ui_node_modules:
+  ollama_data:

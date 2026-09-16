@@ -17,9 +17,16 @@ build.
 
 ## Status
 
-Phase 0 (scaffold + docs) is complete. No behavior is implemented yet —
-see `docs/PROGRESS.md` for the live phase-by-phase tracker and
-`docs/phases/` for what's next.
+Functional, not just scaffolded: all four connectors (Azure DevOps, GitHub,
+Confluence, Jira) sync in both fixture and live mode, the periodic sync
+scheduler, deterministic + LLM-assisted relationship extraction (ADR-011),
+context-pack retrieval, the Context MCP server, the REST API, and the UI
+(catalog explorer, enterprise graph, proposed-links review queue, workflow
+templates) are all implemented and covered by the test suite.
+
+`docs/PROGRESS.md`'s phase-by-phase tracker stops updating at Phase 9 and
+is stale relative to the code — treat it as historical, not current status,
+until it's audited and brought back in sync.
 
 ## Layout
 
@@ -34,7 +41,7 @@ ui/             React + TypeScript + Vite
 docs/           architecture, ADRs, per-phase specs, progress tracker
 ```
 
-## Quickstart (once phases land — not yet functional)
+## Quickstart
 
 ```bash
 cp .env.example .env
@@ -48,6 +55,18 @@ context-fabric reconcile --context-space talentflow/identity
 
 uvicorn context_fabric.main:app --reload   # REST API + Context MCP (HTTP)
 ```
+
+`.env.example` documents every setting, including that `CF_DATABASE_URL`
+works against either Postgres (primary/production) or SQLite
+(zero-install, local/demo — see its own note on the one tradeoff) with no
+other code changes, and that `CF_OLLAMA_*` (search abstracts, embeddings,
+ADR-011 relationship extraction) is entirely optional: when unset or
+unreachable, those features degrade to no-ops per document/page rather
+than failing sync or the API.
+
+For `CF_MODE=live`, fill in the relevant connector credentials in `.env`
+and create a live connection via `POST /api/connectors` (or the
+Connectors page in the UI) instead of the fixture-mode CLI commands above.
 
 UI (via Docker, since Node is not required on the host):
 
