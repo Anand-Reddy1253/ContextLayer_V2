@@ -6,6 +6,9 @@
 *.key
 secrets/
 
+# --- local-only MCP config: hardcodes a machine-specific path, not portable ---
+.mcp.json
+
 # --- Python ---
 __pycache__/
 *.py[cod]

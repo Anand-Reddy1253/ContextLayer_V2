@@ -24,8 +24,35 @@ describe_schema()              → every kind, its properties, and relation type
 describe_schema(kind="STORY")  → just that one
 ```
 
-It returns `kinds`, `properties` (attribute keys per kind), `relations`, and
-`meta_properties`.
+It returns `kinds` (nested `{source: {kind: count}}` — read this per-source, not
+as one flat list — see below), `properties` (attribute *keys* per kind, not
+their values — see "Kind vs. label" below), `relations`, and `meta_properties`.
+
+### Kind vs. label/attribute value — the same word means different things per vendor
+
+The same real-world concept ("a bug") is a first-class **kind** in some
+systems and only a **label or attribute value** in others — `describe_schema`'s
+`kinds` is the only reliable way to tell which, per source, before you write a
+query:
+
+- Jira/Azure DevOps model bugs as a real, structured kind: `$blueprint = "BUG"`
+  is a valid, efficient filter there.
+- GitHub has **no** `BUG` kind at all — only `ISSUE` and `PULL_REQUEST`. "Bug"
+  only ever shows up as a **label** on an `ISSUE` (`{"property": "labels",
+  "operator": "containsAny", "value": ["bug"]}`), never as `$blueprint`.
+
+Querying `$blueprint = "BUG"` scoped to GitHub returns a clean `matched: 0` —
+**check the response's `warnings` key before trusting that zero.** When a
+query names a `$blueprint` that doesn't exist at all, or doesn't exist for the
+`$source` it's paired with, `search_entities`/`aggregate_entities` add a
+`warnings` entry explaining exactly that (which sources the kind *does* exist
+for, and what kinds the source you asked about actually has instead) — a bare
+`matched: 0` / empty `results` with **no** `warnings` key means the zero is
+real. Never assume a kind name from one vendor applies to another; check
+`properties` (which attribute *keys* exist, e.g. `labels`) and, if you need to
+know what *values* a key actually holds (is "bug" really a label anyone
+used?), run a discovery query first — e.g. `aggregate_entities(group_by=
+["labels"])` — rather than guessing a value and trusting silence.
 
 ## Query shape
 
@@ -106,11 +133,17 @@ one call:
 aggregate_entities(
   query='{"rules":[{"property":"$blueprint","operator":"=","value":"PULL_REQUEST"}]}',
   group_by=["$source"])
-→ [{"$source":"azure_devops","count":101},{"$source":"github","count":37}]
+→ {"results": [{"$source":"azure_devops","count":101},{"$source":"github","count":37}],
+   "warnings": []}
 ```
 
 That answer spans two vendors at once — neither tool's own MCP server can
-produce it.
+produce it. The response is always `{"results": [...], "warnings": [...]}`,
+never a bare array — `warnings` is present (possibly empty) so an empty
+`results` is never ambiguous between "genuinely zero" and "the `$blueprint`
+you filtered/grouped by doesn't apply to the `$source` in question" (see
+"Kind vs. label" above — this is the same trap `search_entities` has, and the
+same fix).
 
 ## Reading the response
 
@@ -132,6 +165,10 @@ produce it.
   edges.
 - **`locator`** on anchors gives `source_system` + `native_id` + `url` for
   handing off to the vendor's MCP server.
+- **`warnings` (only present when `rollup.matched` is 0).** If present, your
+  query's own `$blueprint` assumption was wrong for at least one `$source` it
+  was paired with — read it before concluding the answer is a real zero (see
+  "Kind vs. label" above). No `warnings` key at all means the zero is real.
 
 ## Worked examples
 
@@ -207,12 +244,26 @@ any other scoped question — nothing here is a special "workflow" endpoint.
 
 ## Known limits — say so rather than inventing
 
-- **No cross-tool links yet.** PR → work item edges do not exist in this
-  catalog, so "which stories have a PR" is unanswerable. Don't infer it from
-  name similarity.
+- **Cross-tool links are real but sparse, and only ever weak `MENTIONS`.**
+  Confirmed live: a Jira ticket can `MENTIONS` a GitHub PR, a Confluence page
+  can `MENTIONS` an Azure DevOps task — but there is no cross-vendor
+  `IMPLEMENTS`/`CHANGES` (the stronger, structured "this PR implements that
+  ticket" link is same-vendor only today). So "which stories have a PR" is
+  answerable only as "which stories are *mentioned by* a PR" via a `MENTIONS`
+  `relatedTo` query, not as a reliable implements/closes relationship — don't
+  infer the latter from a `MENTIONS` edge or from name similarity.
 - **No deployments.** Deployment frequency and DORA metrics have no data
   behind them.
-- **`aggregate_entities` counts only** — no averages or computed intervals, so
-  PR cycle time isn't available even though the timestamps are.
+- **`aggregate_entities` isn't count-only** — `metrics` also supports `avg`,
+  `sum`, `min`, `max` (need `property`), and `avg_duration_days` (needs
+  `start`/`end` — the metric that actually answers "average PR cycle time",
+  since a plain `avg` can't express an interval between two timestamps). See
+  the "Counting" section's worked example for the default (count) shape.
+- **`isEmpty`/`isNotEmpty` are unreliable on list-valued properties** (e.g.
+  `labels`) — confirmed live: `{"property":"labels","operator":"isEmpty"}`
+  returned 0 matches against a set where the true count was 13. For a list
+  property, use `aggregate_entities(group_by=["labels"])` and check for an
+  absent/empty group instead of trusting `isEmpty` directly; this operator is
+  fine on scalar properties (`assigned_to`, `description`).
 - **Everything is read-only.** To comment on a PR or edit an issue, use that
   vendor's own MCP server so the action is attributed to the real actor.
