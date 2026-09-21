@@ -18,8 +18,10 @@ from uuid import UUID
 
 from context_fabric.api.routes.catalog import (
     aggregate_entities,
+    blueprint_mismatch_warnings,
     describe_schema,
     locator_json,
+    search_cards,
     search_entities,
 )
 from context_fabric.domain.query import AggregateQuery, EntityQuery, RuleGroup
@@ -189,14 +191,39 @@ async def get_workflow_template_tool(template_id: str) -> str:
 async def describe_schema_tool(kind: str | None = None) -> str:
     """What can be queried — kinds, their properties, and relations.
 
-    Call this before writing a query. The set of kinds is not declared
-    anywhere in code; it is whatever the connectors have actually synced, so
-    guessing a kind name is the most likely way for a query to silently match
-    nothing.
+    Call this once per task and reuse the answer — schema only changes
+    when a sync adds something new, so there's no reason to re-call it
+    for every query in the same conversation.
+
+    Args:
+        kind: optional, narrow to one kind (cuts response size a lot —
+            prefer this over the unscoped call once you know what you're
+            looking for).
+
+    Response shape (compact — every kind/relation row on the REST
+    endpoint this shares logic with repeats "kind"/"source_system"/
+    "count" as JSON keys per row; here they're nested instead):
+
+        {"kinds": {"<source_system>": {"<kind>": <count>, ...}, ...},
+         "properties": {"<kind>": ["<attribute key>", ...], ...},
+         "relations": {"<edge type>": <count>, ...},
+         "meta_properties": ["$identifier", "$title", ...]}
     """
     async with session_scope() as session:
         result = await describe_schema(kind=kind, session=session)
-    return json.dumps(result, default=str)
+
+    kinds: dict[str, dict[str, int]] = {}
+    for row in result["kinds"]:
+        kinds.setdefault(row["source_system"] or "?", {})[row["kind"]] = row["count"]
+    relations = {row["relation"]: row["count"] for row in result["relations"]}
+
+    compact = {
+        "kinds": kinds,
+        "properties": result["properties"],
+        "relations": relations,
+        "meta_properties": result["meta_properties"],
+    }
+    return json.dumps(compact, default=str)
 
 
 async def search_entities_tool(query: str, limit: int = 25) -> str:
@@ -258,6 +285,15 @@ async def aggregate_entities_tool(
         metrics='[{"op":"avg_duration_days","start":"created_at","end":"closed_at","as":"cycle_time_days"}]'
 
     Computed live from the database, so the numbers are never stale.
+
+    Response shape: `{"results": [...], "warnings": [...]}` — `warnings`
+    is present (possibly empty) so an empty `results` is never silently
+    ambiguous between "genuinely zero" and "the query's own `$blueprint`
+    premise doesn't exist for the `$source` it was paired with" (e.g.
+    grouping by a kind GitHub doesn't model, like `BUG` — GitHub only has
+    `ISSUE`/`PULL_REQUEST`; Jira does have a real `BUG` kind). Check
+    `describe_schema`'s `kinds` before assuming a kind name applies to
+    every source.
     """
     metric_specs = json.loads(metrics) if metrics else None
     request = AggregateQuery(
@@ -267,4 +303,122 @@ async def aggregate_entities_tool(
     )
     async with session_scope() as session:
         result = await aggregate_entities(request, session=session)
-    return json.dumps(result, default=str)
+        warnings = (
+            await blueprint_mismatch_warnings(session, request.query) if not result else []
+        )
+    return json.dumps({"results": result, "warnings": warnings}, default=str)
+
+
+def _compact_ancestor(ancestor: dict[str, Any]) -> dict[str, Any]:
+    """A breadcrumb, not a fetchable match — kind/name/native_id only.
+    Found live: search_cards's own ancestor entries already drop
+    attributes and native_call, but still carry the full node dict's
+    other ~10 mostly-null keys (id, layer, capability, description,
+    parent_id, status, deleted_at, ...) and a full locator, repeated per
+    ancestor per card."""
+    return {
+        "kind": ancestor["node"]["kind"],
+        "name": ancestor["node"]["name"],
+        "native_id": ancestor["locator"]["native_id"],
+    }
+
+
+def _compact_link(link: dict[str, Any]) -> dict[str, Any]:
+    """A cross-reference, not the match itself — relation/direction/name
+    plus enough of the locator to act on it, dropping the rest. Found
+    live: search_context's `links` was the dominant cost of every huge
+    response (one real card: 31KB of a 33KB total, 20 links) because each
+    entry carried a full edge record (its own internal id/src_id/dst_id
+    UUIDs and attributes bag — meaningless off this graph) plus a
+    largely-empty full node dict, on top of the locator that already
+    carries everything actually actionable."""
+    locator = link["locator"]
+    return {
+        "relation": link["edge"]["type"],
+        "direction": link["direction"],
+        "name": link["node"]["name"],
+        "locator": {
+            "source_system": locator["source_system"],
+            "native_id": locator["native_id"],
+            "url": locator["url"],
+        },
+    }
+
+
+def _compact_card(card: dict[str, Any], *, include_links: bool) -> dict[str, Any]:
+    node = card["node"]
+    compact: dict[str, Any] = {
+        "node": {
+            "kind": node["kind"],
+            "name": node["name"],
+            "description": node["description"],
+            "path": node["path"],
+        },
+        "locator": card["locator"],
+        "score": card["score"],
+        "ancestors": [_compact_ancestor(a) for a in card["ancestors"]],
+        "business_context": card["business_context"],
+    }
+    if include_links:
+        compact["links"] = [_compact_link(link_item) for link_item in card["links"]]
+    return compact
+
+
+async def search_context_tool(
+    q: str,
+    business_node_id: str | None = None,
+    limit: int = 10,
+    include_links: bool = False,
+) -> str:
+    """Search Context Fabric's technical catalog (Azure DevOps work
+    items/builds/pipelines, GitHub repos/PRs, Confluence pages) for a
+    topic and return matching "cards": each match's ancestor chain
+    (containment — the project/repo/space it lives in), its owning
+    team/business context, and a `locator.native_call` giving the exact
+    vendor MCP tool + params to fetch full content from the real source.
+
+    `links` (real cross-system references — a PR that implements this
+    story, and the like) are left out by default, not because they don't
+    exist but because most searches don't need them for every result, and
+    they're the single biggest cost driver when included (found live: one
+    card's `links` alone was 31KB of a 33KB total). Set `include_links`
+    to get them inline for every result anyway, or — usually better —
+    leave it off and, once you know which specific result you care about,
+    call `search_entities` with a relation clause against that result's
+    own `locator.native_id`:
+
+        {"relation": "IMPLEMENTS", "operator": "relatedTo",
+         "value": "<that result's native_id>", "direction": "upstream"}
+
+    That's one call, scoped to the one node you actually want links for,
+    with the same relation-query power (multi-hop, `notRelatedTo` for
+    "what's missing") `links` here can't offer anyway.
+
+    Response is trimmed for this transport, not the REST endpoint's full
+    shape: the matched node itself keeps its full locator (including
+    `native_call` — that's the one you actually fetch), but `ancestors`
+    (and `links`, if included) are breadcrumbs/cross-references, not
+    fetch targets, so they carry only `kind`/`name`/`native_id`
+    (ancestors) or `relation`/`direction`/`name`/a trimmed `locator`
+    (links) — enough to decide whether to chase one down, not a
+    duplicate full node record for each. Ask for the match's own locator
+    (already full) if you need to actually fetch it.
+
+    Args:
+        q: search term (matched against node name/description).
+        business_node_id: optional UUID to scope results to one
+            team/business unit's context space (see the Enterprise
+            Graph / org tree for available team ids).
+        limit: max cards to return (default 10).
+        include_links: include each result's cross-system links inline
+            (default False — see above for why, and the cheaper
+            alternative).
+    """
+    parsed_id = UUID(business_node_id) if business_node_id else None
+    async with session_scope() as session:
+        cards: list[dict[str, Any]] = await search_cards(
+            q=q, business_node_id=parsed_id, limit=limit, session=session
+        )
+    return json.dumps(
+        [_compact_card(c, include_links=include_links) for c in cards], default=str
+    )

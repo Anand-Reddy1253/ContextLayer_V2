@@ -6,7 +6,7 @@ from datetime import datetime
 from typing import cast
 from uuid import UUID
 
-from sqlalchemy import CursorResult, or_, select, update
+from sqlalchemy import CursorResult, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from context_fabric.domain.edge import Edge
@@ -133,6 +133,21 @@ class EdgeRepository:
         stmt = stmt.order_by(EdgeORM.first_seen_at.desc()).limit(limit)
         rows = (await self._session.execute(stmt)).scalars().all()
         return [_to_domain(r) for r in rows]
+
+    async def count_by_state(self, state: str, *, edge_types: list[str] | None = None) -> int:
+        """The true total behind `list_by_state`'s own `limit` — found
+        live: a real org's proposed-edge queue reached 610 rows against a
+        500-row default `limit`, and with no total ever surfaced, "select
+        all" bulk-confirming the visible page silently revealed a second
+        batch on refresh that looked exactly like the same items asking
+        to be approved again. Call this alongside list_by_state so a
+        caller can tell "500 of 500 total" from "500 of 610 total"."""
+        stmt = select(func.count()).select_from(EdgeORM).where(
+            EdgeORM.state == state, EdgeORM.deleted_at.is_(None)
+        )
+        if edge_types:
+            stmt = stmt.where(EdgeORM.type.in_(edge_types))
+        return (await self._session.execute(stmt)).scalar_one()
 
     async def set_state(self, edge_id: UUID, state: str, now: datetime) -> Edge | None:
         row = await self._session.get(EdgeORM, edge_id)

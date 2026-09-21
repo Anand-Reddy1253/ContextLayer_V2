@@ -17,14 +17,19 @@ build.
 
 What's real and already tested is `catalog.search_cards` — the same
 logic backing `GET /api/catalog/search-cards`, verified this session
-against live Azure DevOps/GitHub/Confluence data. This server exposes
-exactly that, as a single MCP tool, calling the same function directly
-(not over HTTP) so there's no extra hop. Every result still carries its
-`locator.native_call` — the point of this being an MCP tool instead of
-a REST curl target is that an agent can call it inline in its own tool
-loop, get back the exact vendor tool + params for follow-up, and hand
-off to the real native GitHub/ADO/Confluence MCP tools for full content
-(ADR-003 — this server is the map, never a data replica).
+against live Azure DevOps/GitHub/Confluence data. `search_context`
+(`mcp/tools.py`) calls that same function directly (not over HTTP) so
+there's no extra hop, then trims the result for this transport — the
+matched node still carries its full `locator.native_call`, but its
+`ancestors`/`links` (breadcrumbs and cross-references, not the match
+itself) are cut to essentials, since a full duplicate node record per
+ancestor/link, unbounded, was found live to dominate response size (one
+card: 33KB, 31KB of it `links`) for data nothing downstream reads at
+that depth. The point of this being an MCP tool instead of a REST curl
+target is that an agent can call it inline in its own tool loop, get
+back the exact vendor tool + params for follow-up, and hand off to the
+real native GitHub/ADO/Confluence MCP tools for full content (ADR-003 —
+this server is the map, never a data replica).
 
 Run standalone: `python -m context_fabric.mcp.server_stdio`
 Actor identity: none yet — authorization/RBAC (ADR-007) isn't wired
@@ -34,15 +39,9 @@ at anything multi-tenant until that's built.
 
 from __future__ import annotations
 
-import json
-from typing import Any
-from uuid import UUID
-
 from mcp.server.mcpserver import MCPServer
 
-from context_fabric.api.routes.catalog import search_cards
 from context_fabric.mcp import tools
-from context_fabric.persistence.session import session_scope
 
 mcp = MCPServer("context-fabric")
 
@@ -51,7 +50,21 @@ mcp = MCPServer("context-fabric")
 # same ones (docs/MCP.md). The decorator reads the signature and docstring at
 # registration time — those *are* the schema and description the model sees, so
 # they belong here rather than being copied across afterwards.
-@mcp.tool()
+#
+# structured_output=False on every tool below: every one already returns its
+# own pre-serialized JSON string (mcp/tools.py's own docstring — "each
+# returns a JSON string because that is what an MCP tool result is"). Left at
+# the SDK's default, a bare `-> str` return annotation still triggers
+# "structured output" support, which wraps that already-JSON string a second
+# time as `{"result": "<the same string, now fully quote-escaped>"}` *and*
+# sends it *in addition to* the identical plain-text content block — every
+# call ships its payload twice, and the wrapped copy is bigger than the
+# original because of the escaping. Found live: describe_schema() sent 5,021
+# chars of text plus a second, 5,793-char structured copy of the exact same
+# data, advertised under a schema of `{"result": {"type": "string"}}` that
+# tells a caller nothing. structured_output=False turns all of that off —
+# one copy, no synthetic wrapper — with no change to what any tool returns.
+@mcp.tool(structured_output=False)
 async def resolve_scope(
     task_ref: str, actor_id: str, context_space_override: str | None = None
 ) -> str:
@@ -83,7 +96,7 @@ async def resolve_scope(
     return await tools.resolve_scope_tool(task_ref, actor_id, context_space_override)
 
 
-@mcp.tool()
+@mcp.tool(structured_output=False)
 async def list_workflow_templates(context_space_id: str | None = None) -> str:
     """Discover workflow templates — a named, ordered pipeline of steps
     (each a specific agent/skill) a harness pulls and executes in order.
@@ -103,7 +116,7 @@ async def list_workflow_templates(context_space_id: str | None = None) -> str:
     return await tools.list_workflow_templates_tool(context_space_id)
 
 
-@mcp.tool()
+@mcp.tool(structured_output=False)
 async def get_workflow_template(template_id: str) -> str:
     """Fetch one workflow template's full, ordered pipeline of steps —
     each step a specific agent/skill picked from the catalog at author
@@ -126,7 +139,7 @@ async def get_workflow_template(template_id: str) -> str:
     return await tools.get_workflow_template_tool(template_id)
 
 
-@mcp.tool()
+@mcp.tool(structured_output=False)
 async def describe_schema(kind: str | None = None) -> str:
     """What can be queried — kinds, their properties, and relations.
 
@@ -141,7 +154,7 @@ async def describe_schema(kind: str | None = None) -> str:
     return await tools.describe_schema_tool(kind)
 
 
-@mcp.tool()
+@mcp.tool(structured_output=False)
 async def search_entities(query: str, limit: int = 25) -> str:
     """Search entities with the structured rule grammar.
 
@@ -171,6 +184,15 @@ async def search_entities(query: str, limit: int = 25) -> str:
     node's `path`, not as edges. Anchors carry a `locator` for handing off to
     the vendor's own MCP server.
 
+    A `warnings` key appears only when `rollup.matched` is 0 AND the query
+    named a `$blueprint` (kind) that doesn't exist at all, or doesn't exist
+    for the `$source` it was paired with — e.g. `$blueprint="BUG"` against
+    `$source="github"` (GitHub has no BUG kind; "bug" is only ever a label
+    on an ISSUE there, while Jira *does* have a real BUG kind). Without this,
+    a wrong kind name and a genuinely-empty result look identical. A bare
+    `matched: 0` with no `warnings` key means the zero is real — call
+    describe_schema first if unsure which kinds exist per source.
+
     Args:
         query: the JSON rule group.
         limit: max anchors to return (default 25).
@@ -178,7 +200,7 @@ async def search_entities(query: str, limit: int = 25) -> str:
     return await tools.search_entities_tool(query, limit)
 
 
-@mcp.tool()
+@mcp.tool(structured_output=False)
 async def aggregate_entities(
     query: str, group_by: list[str], metrics: str | None = None
 ) -> str:
@@ -188,6 +210,12 @@ async def aggregate_entities(
     fetching rows and computing something yourself — "how many open PRs per
     repository" or "average PR cycle time per repo" is one call, not N.
     Computed live, so never stale.
+
+    Returns `{"results": [...], "warnings": [...]}` — `warnings` is always
+    present (possibly empty) so an empty `results` is never silently
+    ambiguous between "genuinely zero groups" and "the query's own
+    `$blueprint` premise doesn't apply to the `$source` it was grouped/
+    filtered by" (same trap as search_entities — see its own docstring).
 
     Args:
         query: the JSON rule group to filter by.
@@ -204,19 +232,31 @@ async def aggregate_entities(
     return await tools.aggregate_entities_tool(query, group_by, metrics)
 
 
-@mcp.tool()
+@mcp.tool(structured_output=False)
 async def search_context(
     q: str,
     business_node_id: str | None = None,
     limit: int = 10,
+    include_links: bool = False,
 ) -> str:
     """Search Context Fabric's technical catalog (Azure DevOps work
     items/builds/pipelines, GitHub repos/PRs, Confluence pages) for a
     topic and return matching "cards": each match's ancestor chain
-    (containment — the project/repo/space it lives in), its real
-    cross-system links, its owning team/business context, and a
-    `locator.native_call` giving the exact vendor MCP tool + params to
-    fetch full content from the real source.
+    (containment — the project/repo/space it lives in), its owning
+    team/business context, and a `locator.native_call` giving the exact
+    vendor MCP tool + params to fetch full content from the real source.
+    `ancestors` are trimmed to kind/name/native_id — a breadcrumb, not a
+    fetch target — see `search_context_tool`'s own docstring for the
+    exact shape and why.
+
+    Cross-system `links` are left out by default — they were the single
+    biggest cost driver of every response, and most searches don't need
+    them for every result. Set `include_links=true` to get them inline
+    anyway, or (usually cheaper) once you know which result you care
+    about, call `search_entities` with a relation clause against that
+    result's own `locator.native_id` instead — one call, scoped to just
+    that node, with real relation-query power (multi-hop, `notRelatedTo`)
+    inline links can't offer.
 
     Args:
         q: search term (matched against node name/description).
@@ -224,13 +264,10 @@ async def search_context(
             team/business unit's context space (see the Enterprise
             Graph / org tree for available team ids).
         limit: max cards to return (default 10).
+        include_links: include each result's cross-system links inline
+            (default False).
     """
-    parsed_id = UUID(business_node_id) if business_node_id else None
-    async with session_scope() as session:
-        cards: list[dict[str, Any]] = await search_cards(
-            q=q, business_node_id=parsed_id, limit=limit, session=session
-        )
-    return json.dumps(cards, default=str)
+    return await tools.search_context_tool(q, business_node_id, limit, include_links)
 
 
 if __name__ == "__main__":

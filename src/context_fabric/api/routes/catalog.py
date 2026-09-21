@@ -23,7 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from context_fabric.api.deps import get_session
 from context_fabric.domain.edge import Edge
 from context_fabric.domain.enums import EdgeOrigin, EdgeState, EdgeType, Layer
-from context_fabric.domain.query import AggregateQuery, EntityQuery
+from context_fabric.domain.query import AggregateQuery, EntityQuery, PropertyRule, RuleGroup
 from context_fabric.enrichment.ollama_client import EnrichmentError, OllamaClient
 from context_fabric.persistence.orm.edge import EdgeORM
 from context_fabric.persistence.orm.node import NodeORM
@@ -396,21 +396,28 @@ async def list_proposed_edges(
     type: str | None = None,
     limit: int = 500,
     session: AsyncSession = Depends(get_session),
-) -> list[dict[str, Any]]:
+) -> dict[str, Any]:
     """The review queue documented in docs/UI.md "Proposed links review
     queue" — every `state=PROPOSED` edge (produced today by
     synchronization/link_extraction.py's regex-based extraction), each
     with its src/dst node summaries resolved so the UI never has to make
     a second round trip per row. `type` optionally narrows to a
     comma-separated list of EdgeType values (e.g. "RELATED_TO,MENTIONS").
-    `limit` defaults higher than EdgeRepository.list_by_state's own
-    default (200) — a "select all" bulk action needs the true full set,
-    not a silently truncated page, and 200 was already close to a real
-    org's actual queue depth (181 at last count)."""
+
+    Returns `{"items": [...], "total": N}`, not a bare array — `limit`
+    (default 500, well above EdgeRepository.list_by_state's own 200
+    default) still caps `items`, but a caller needs `total` to tell "500
+    of 500" from "500 of 610" and know the queue isn't actually empty
+    yet. Found live: a real org's queue reached 610 rows against the old
+    bare-array shape's silent 500-row cap — "select all" bulk-confirmed
+    the visible 500, and the remaining ~110 surfaced on refresh looking
+    exactly like the same items asking to be approved again, with
+    nothing in the response ever telling the caller there was a second
+    batch at all."""
     edge_types = type.split(",") if type else None
-    edges = await EdgeRepository(session).list_by_state(
-        "PROPOSED", edge_types=edge_types, limit=limit
-    )
+    edge_repo = EdgeRepository(session)
+    edges = await edge_repo.list_by_state("PROPOSED", edge_types=edge_types, limit=limit)
+    total = await edge_repo.count_by_state("PROPOSED", edge_types=edge_types)
     node_repo = NodeRepository(session)
     result = []
     for edge in edges:
@@ -423,7 +430,7 @@ async def list_proposed_edges(
                 "dst": _node_json(dst) if dst else None,
             }
         )
-    return result
+    return {"items": result, "total": total}
 
 
 class BulkEdgeIdsRequest(BaseModel):
@@ -1470,6 +1477,78 @@ def _rollup(rows: list[NodeORM]) -> dict[str, Any]:
     return out
 
 
+def _rule_group_property_values(group: RuleGroup, prop: str) -> set[str]:
+    """Every literal value `prop` is tested against via `=` or `in`,
+    anywhere in a rule tree — used only by `blueprint_mismatch_warnings`
+    below to sanity-check a query's own assumptions after the fact, never
+    to change how the query itself is compiled."""
+    values: set[str] = set()
+    for rule in group.rules:
+        if isinstance(rule, RuleGroup):
+            values |= _rule_group_property_values(rule, prop)
+        elif isinstance(rule, PropertyRule) and rule.property == prop:
+            if rule.operator == "=" and rule.value is not None:
+                values.add(str(rule.value))
+            elif rule.operator == "in" and isinstance(rule.value, list):
+                values.update(str(v) for v in rule.value)
+    return values
+
+
+async def blueprint_mismatch_warnings(session: AsyncSession, query: RuleGroup) -> list[str]:
+    """A query naming a `$blueprint` (kind) that doesn't exist at all, or
+    doesn't exist for the `$source` it's paired with, silently matches
+    nothing — indistinguishable from a real, correct zero. Found live: an
+    agent that skipped `describe_schema`, or assumes every vendor models
+    the same concept as a first-class kind (GitHub has no `BUG` kind —
+    "bug" only ever shows up as a label on an `ISSUE`; Jira does have a
+    real `BUG` kind), gets a clean `matched: 0` with nothing signaling
+    the query's own premise was wrong. Public (not `_`-prefixed): both
+    `search_entities` here and `mcp/tools.py`'s `aggregate_entities_tool`
+    call this — the same trap exists on both query shapes.
+
+    Deliberately gated by the caller on `matched == 0` (or an empty
+    aggregate result) — this runs a couple of extra lookups per
+    `$blueprint` value named, so the common, successful-query path never
+    pays for it."""
+    blueprints = _rule_group_property_values(query, "$blueprint")
+    if not blueprints:
+        return []
+    sources = _rule_group_property_values(query, "$source")
+
+    warnings: list[str] = []
+    for kind in blueprints:
+        kind_sources_stmt = (
+            select(NodeORM.source_system)
+            .where(NodeORM.kind == kind, NodeORM.deleted_at.is_(None))
+            .distinct()
+        )
+        kind_sources = {
+            s for s in (await session.execute(kind_sources_stmt)).scalars().all() if s
+        }
+        if not kind_sources:
+            warnings.append(
+                f"$blueprint={kind!r} matches no node anywhere in the catalog — "
+                "call describe_schema to see the real kind vocabulary before "
+                "assuming this kind exists."
+            )
+            continue
+        for source in sorted(sources - kind_sources):
+            available_stmt = (
+                select(NodeORM.kind)
+                .where(NodeORM.source_system == source, NodeORM.deleted_at.is_(None))
+                .distinct()
+            )
+            available = sorted((await session.execute(available_stmt)).scalars().all())
+            warnings.append(
+                f"$blueprint={kind!r} has no nodes from $source={source!r} "
+                f"(it exists for: {sorted(kind_sources)}); {source!r} has these "
+                f"kinds instead: {available} — {kind!r} may be a label or "
+                f"attribute value there, not a kind (check describe_schema's "
+                f"'properties')."
+            )
+    return warnings
+
+
 @router.post("/entities/search")
 async def search_entities(
     request: EntityQuery, session: AsyncSession = Depends(get_session)
@@ -1553,7 +1632,7 @@ async def search_entities(
     ref_by_id = {node_id: f"n{i}" for i, node_id in enumerate(nodes, start=1)}
     anchor_id_set = {str(a.id) for a in anchors}
 
-    return {
+    result: dict[str, Any] = {
         "rollup": _rollup(anchors),
         "anchors": [{"ref": ref_by_id[str(a.id)]} for a in anchors],
         "nodes": {
@@ -1566,6 +1645,11 @@ async def search_entities(
         ],
         "expand": {"node": "/api/catalog/nodes/{id}/links"},
     }
+    if result["rollup"]["matched"] == 0:
+        warnings = await blueprint_mismatch_warnings(session, request.query)
+        if warnings:
+            result["warnings"] = warnings
+    return result
 
 
 @router.post("/entities/aggregate")
@@ -1637,11 +1721,29 @@ async def describe_schema(
         for r in (await session.execute(kind_stmt)).all()
     ]
 
-    attr_stmt = (
-        select(NodeORM.kind, func.jsonb_object_keys(NodeORM.attributes).label("attr"))
-        .where(NodeORM.deleted_at.is_(None))
-        .distinct()
-    )
+    # jsonb_object_keys is a Postgres-only set-returning function — found
+    # live (context-fabric-eval, 2026-09-16): every SQLite deployment hit
+    # a hard `no such function: jsonb_object_keys` error here, breaking
+    # the one call the query-language skill tells an agent to make first.
+    # SQLite's own JSON1 extension (bundled since SQLite 3.38, well under
+    # what aiosqlite ships) exposes the equivalent as `json_each`, a
+    # table-valued function joined against the outer row rather than a
+    # plain column expression, hence the differently-shaped statement
+    # rather than a one-line swap.
+    dialect_name = session.get_bind().dialect.name
+    if dialect_name == "sqlite":
+        each = func.json_each(NodeORM.attributes).table_valued("key", joins_implicitly=True)
+        attr_stmt = (
+            select(NodeORM.kind, each.c.key.label("attr"))
+            .where(NodeORM.deleted_at.is_(None))
+            .distinct()
+        )
+    else:
+        attr_stmt = (
+            select(NodeORM.kind, func.jsonb_object_keys(NodeORM.attributes).label("attr"))
+            .where(NodeORM.deleted_at.is_(None))
+            .distinct()
+        )
     if kind:
         attr_stmt = attr_stmt.where(NodeORM.kind == kind)
     properties: dict[str, list[str]] = {}

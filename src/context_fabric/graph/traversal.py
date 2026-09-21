@@ -17,7 +17,7 @@ from __future__ import annotations
 from typing import Literal
 from uuid import UUID
 
-from sqlalchemy import bindparam, text
+from sqlalchemy import Uuid, bindparam, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from context_fabric.domain.enums import EdgeType
@@ -65,13 +65,29 @@ async def _traverse_one_direction(
         SELECT DISTINCT node_id FROM reachable
         """
     )
+    # `root_id` needs an explicit type on its bindparam, same reasoning as
+    # `edge_types`'s `expanding=True` just above: a raw text() query has no
+    # column to inherit a bind/result processor from, so a plain Python
+    # `uuid.UUID` object is handed to the DBAPI driver as-is. asyncpg
+    # accepts that natively; aiosqlite does not (`sqlite3.OperationalError:
+    # ... type 'UUID' is not supported`) — found live (context-fabric-eval,
+    # 2026-09-16), breaking every relation-anchored search_entities query
+    # on a SQLite deployment. The generic `sqlalchemy.Uuid` type (the same
+    # one NodeORM/EdgeORM's id columns use) knows how to convert both ways
+    # for whichever dialect is connected.
+    sql = sql.bindparams(bindparam("root_id", type_=Uuid()))
     params: dict[str, object] = {"root_id": root_id, "max_hops": max_hops}
     if edge_types:
         sql = sql.bindparams(bindparam("edge_types", expanding=True))
         params["edge_types"] = [t.value for t in edge_types]
 
     result = await session.execute(sql, params)
-    return {row[0] for row in result}
+    # Symmetric with the input side: `node_id` is a raw computed column
+    # from the CTE, not a typed model column, so its result value is
+    # whatever the driver returns natively — already a UUID on Postgres,
+    # a plain str on SQLite. Normalize so every caller gets real UUID
+    # objects regardless of dialect.
+    return {row[0] if isinstance(row[0], UUID) else UUID(str(row[0])) for row in result}
 
 
 async def traverse(
