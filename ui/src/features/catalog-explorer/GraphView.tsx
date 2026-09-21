@@ -380,27 +380,50 @@ export function GraphView({
           type: "CONTAINS",
         },
       })),
-      // Edges between two collapsed members, or a collapsed member and
-      // anything else, are dropped rather than redirected at the cluster
-      // — real cross-links are rare (2 in the whole dataset, confirmed),
-      // so it's not worth the visual noise of a cluster-to-X edge that
-      // only some members actually have.
-      ...graph.edges
-        .filter((e) => !collapsedMemberOf.has(e.src_id) && !collapsedMemberOf.has(e.dst_id))
-        .map((e) => ({
-          data: {
-            id: e.id,
-            source: e.src_id,
-            target: e.dst_id,
-            type: e.type,
-            // CONTAINS is the tree backbone — every parent/child pair has
-            // one, so labeling it would repeat "contains" on nearly every
-            // line in the graph. Its solid-line-vs-dashed distinction
-            // (buildStylesheet) already says "this is containment"
-            // without needing the word written out.
-            label: e.type === "CONTAINS" ? "" : edgeLabel(e.type),
-          },
-        })),
+      // A non-CONTAINS edge touching a collapsed member is redirected to
+      // point at the cluster node instead of being dropped — found live,
+      // against a real multi-vendor dataset: every one of 23 real
+      // cross-system MENTIONS edges (a Confluence ADR citing a specific
+      // GitHub PR, a Jira ticket citing a specific issue) touched a PR/
+      // Issue that was itself one of thousands of same-repo siblings, so
+      // the old "just drop it" rule (written when cross-links really
+      // were rare — 2 in the whole dataset at the time) silently erased
+      // every single one, making GitHub look completely disconnected
+      // from Confluence/Jira even though the data was fully connected.
+      // CONTAINS is excluded here on purpose: every collapsed member's
+      // own CONTAINS-to-parent edge would just duplicate the one
+      // explicit cluster->parent edge already added above.
+      ...(() => {
+        const seen = new Set<string>();
+        const out: { data: { id: string; source: string; target: string; type: string; label: string } }[] = [];
+        for (const e of graph.edges) {
+          const srcCluster = collapsedMemberOf.get(e.src_id);
+          const dstCluster = collapsedMemberOf.get(e.dst_id);
+          if (!srcCluster && !dstCluster) {
+            out.push({
+              data: {
+                id: e.id,
+                source: e.src_id,
+                target: e.dst_id,
+                type: e.type,
+                label: e.type === "CONTAINS" ? "" : edgeLabel(e.type),
+              },
+            });
+            continue;
+          }
+          if (e.type === "CONTAINS") continue;
+          if (srcCluster && dstCluster && srcCluster.id === dstCluster.id) continue;
+          const source = srcCluster ? srcCluster.id : e.src_id;
+          const target = dstCluster ? dstCluster.id : e.dst_id;
+          const key = `${source}->${target}:${e.type}`;
+          if (seen.has(key)) continue;
+          seen.add(key);
+          out.push({
+            data: { id: `cluster-edge:${key}`, source, target, type: e.type, label: edgeLabel(e.type) },
+          });
+        }
+        return out;
+      })(),
     ];
 
     // `cose` (force-directed physics) is the preferred look — user

@@ -309,7 +309,7 @@ export const api = {
   deleteEdge: (edgeId: string) => request<void>(`/catalog/edges/${edgeId}`, { method: "DELETE" }),
   listProposedEdges: (type?: string) => {
     const qs = type ? `?type=${encodeURIComponent(type)}` : "";
-    return request<ProposedEdge[]>(`/catalog/edges/proposed${qs}`);
+    return request<{ items: ProposedEdge[]; total: number }>(`/catalog/edges/proposed${qs}`);
   },
   confirmProposedEdge: (edgeId: string) =>
     request<CatalogEdge>(`/catalog/edges/${edgeId}/confirm`, { method: "POST" }),
