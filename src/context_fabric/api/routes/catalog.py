@@ -23,6 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from context_fabric.api.deps import get_session
 from context_fabric.domain.edge import Edge
 from context_fabric.domain.enums import EdgeOrigin, EdgeState, EdgeType, Layer
+from context_fabric.domain.node import Node
 from context_fabric.domain.query import AggregateQuery, EntityQuery, PropertyRule, RuleGroup
 from context_fabric.enrichment.ollama_client import EnrichmentError, OllamaClient
 from context_fabric.persistence.orm.edge import EdgeORM
@@ -522,23 +523,137 @@ async def retype_proposed_edge(
     return _edge_json(updated)
 
 
+async def _bound_business_chain(
+    session: AsyncSession,
+    node_repo: NodeRepository,
+    ordered_self_and_ancestors: list[Node],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """The BINDS -> context space -> HAS_CONTEXT_SPACE -> business node
+    walk `_business_context_for` uses for search_cards, but returning
+    renderable nodes/edges (plus the business node's own ancestor chain)
+    instead of just a summary — for get_node_graph's team/org handling.
+    A context-space binding is never an Edge-table row (see
+    _build_enterprise_graph_data: it's synthesized from
+    ContextSpace.bindings, resolved by technical identity), so this can't
+    reuse edge_repo for the BINDS/HAS_CONTEXT_SPACE hop the way the ltree
+    ancestor walk reuses list_ancestors_of_path. Checks self, then nearest
+    ancestor, ... up to root (a binding usually sits on a container, not
+    every item beneath it) and stops at the first match — one deliberate
+    binding, not every one that happens to exist in the org."""
+    context_space_repo = ContextSpaceRepository(session)
+    target_lookup: dict[UUID, tuple[Any, Any]] = {}
+    for space in await context_space_repo.list_all():
+        for binding in space.bindings:
+            target = await node_repo.get_by_technical_identity(
+                binding.source_system, binding.source_instance_id, binding.native_container
+            )
+            if target is not None and target.id not in target_lookup:
+                target_lookup[target.id] = (space, binding)
+
+    for candidate in ordered_self_and_ancestors:
+        match = target_lookup.get(candidate.id)
+        if match is None:
+            continue
+        space, binding = match
+        business_node = await node_repo.get(space.business_node_id)
+        if business_node is None:
+            continue
+        business_ancestors = await node_repo.list_ancestors_of_path(business_node.path)
+
+        edges: list[dict[str, Any]] = []
+        for n in business_ancestors:
+            if n.parent_id is not None:
+                edges.append(
+                    {
+                        "id": f"biz-parent:{n.id}",
+                        "src_id": str(n.parent_id),
+                        "dst_id": str(n.id),
+                        "type": "CONTAINS",
+                        "origin": "HUMAN",
+                        "state": "ACTIVE",
+                        "confidence": None,
+                    }
+                )
+        ctxspace_id = f"ctxspace:{space.id}"
+        ctxspace_json = {
+            "id": ctxspace_id,
+            "layer": "LOGICAL",
+            "kind": "CONTEXT_SPACE",
+            "capability": None,
+            "name": space.name,
+            "description": space.description,
+            "source_system": None,
+            "source_instance_id": None,
+            "native_id": space.id,
+            "parent_id": str(space.business_node_id),
+            "path": f"ctxspace.{space.id}",
+            "status": space.status,
+            "deleted_at": None,
+            "attributes": {
+                "product": space.product,
+                "teams": space.teams,
+                "services": space.services,
+            },
+        }
+        edges.append(
+            {
+                "id": f"biz-ctxspace:{space.id}",
+                "src_id": str(space.business_node_id),
+                "dst_id": ctxspace_id,
+                "type": "HAS_CONTEXT_SPACE",
+                "origin": "HUMAN",
+                "state": "ACTIVE",
+                "confidence": None,
+            }
+        )
+        edges.append(
+            {
+                "id": f"binding:{binding.id}",
+                "src_id": ctxspace_id,
+                "dst_id": str(candidate.id),
+                "type": "BINDS",
+                "origin": binding.origin.value,
+                "state": "ACTIVE",
+                "confidence": None,
+            }
+        )
+        nodes = [_node_json(n) for n in business_ancestors] + [ctxspace_json]
+        return nodes, edges
+
+    return [], []
+
+
 @router.get("/nodes/{node_id}/graph")
 async def get_node_graph(
     node_id: UUID, session: AsyncSession = Depends(get_session)
 ) -> dict[str, Any]:
-    """Every descendant of this node, every structural/extracted edge
-    among them, *and* every node on the other end of a real cross-
-    reference out of that subtree — e.g. a GitHub PR whose title mentions
-    an Azure Boards work item nested somewhere under this one (docs/UI.md
-    "Catalog Explorer"). That last part used to be silently excluded: a
-    cross-vendor edge's target sits in a different source's own path
-    tree entirely, so a plain "edges among this subtree" query can never
+    """Every descendant of this node, its full ancestor chain up to the
+    root, every structural/extracted edge among them, the business
+    node/team it's bound to (if any, see _bound_business_chain) with its
+    own ancestor chain, *and* every node on the other end of a real
+    cross-reference out of that combined set — e.g. a GitHub PR whose
+    title mentions an Azure Boards work item nested somewhere under this
+    one (docs/UI.md "Catalog Explorer"). Cross-reference handling: a
+    cross-vendor edge's target sits in a different source's own path tree
+    entirely, so a plain "edges among this subtree" query can never
     surface it — real user report: the "full graph" showed the tree but
     never a cross-vendor link, even when one genuinely existed. Fetching
-    edges *touching* the subtree (not just *within* it) and pulling in
-    whatever external node is at the other end fixes that; those external
-    nodes are added standalone (their own subtrees aren't expanded), so
-    this stays one hop out, not an unbounded crawl of the whole graph."""
+    edges *touching* the combined set (not just *within* it) and pulling
+    in whatever external node is at the other end fixes that; those
+    external nodes are added standalone (their own subtrees aren't
+    expanded), so this stays one hop out, not an unbounded crawl of the
+    whole graph. Ancestor handling: a leaf node (a PR, a work item) has no
+    descendants, so before this its own "full graph" was nearly empty and
+    never showed which team or org it actually belongs to — real user
+    report. Unlike descendants, walking upward is cheap and bounded (a
+    single path to the root, never a fan-out), so the whole ancestor
+    chain is included unconditionally rather than left to a second "show
+    hierarchy" request. Business handling: the ltree ancestor walk alone
+    never reaches a team/org — business nodes live on their own separate
+    path tree, connected to a technical container only through an
+    explicit context-space binding (docs/UI.md "Business Hierarchy"),
+    which is why this was still missing after the ltree fix above; same
+    real user report."""
     node_repo = NodeRepository(session)
     node = await node_repo.get(node_id)
     if node is None:
@@ -546,17 +661,20 @@ async def get_node_graph(
     edge_repo = EdgeRepository(session)
 
     subtree_nodes = await node_repo.list_descendants(node.path, include_self=True)
+    ancestor_nodes = await node_repo.list_ancestors_of_path(node.path)
     subtree_ids = {n.id for n in subtree_nodes}
+    core_nodes = subtree_nodes + [n for n in ancestor_nodes if n.id not in subtree_ids]
+    core_ids = subtree_ids | {n.id for n in ancestor_nodes}
 
-    structural_edges = await edge_repo.list_among(list(subtree_ids))
-    cross_edges = await edge_repo.list_touching_any(list(subtree_ids), exclude_types=["CONTAINS"])
+    structural_edges = await edge_repo.list_among(list(core_ids))
+    cross_edges = await edge_repo.list_touching_any(list(core_ids), exclude_types=["CONTAINS"])
     edges_by_id = {e.id: e for e in [*structural_edges, *cross_edges]}
 
     external_ids = {
         other_id
         for e in cross_edges
         for other_id in (e.src_id, e.dst_id)
-        if other_id not in subtree_ids
+        if other_id not in core_ids
     }
     external_nodes = []
     for other_id in external_ids:
@@ -564,10 +682,15 @@ async def get_node_graph(
         if other is not None:
             external_nodes.append(other)
 
-    all_nodes = [*subtree_nodes, *external_nodes]
+    ordered_self_and_ancestors = [node] + [a for a in reversed(ancestor_nodes) if a.id != node.id]
+    business_nodes_json, business_edges_json = await _bound_business_chain(
+        session, node_repo, ordered_self_and_ancestors
+    )
+
+    all_nodes = [*core_nodes, *external_nodes]
     return {
-        "nodes": [_node_json(n) for n in all_nodes],
-        "edges": [_edge_json(e) for e in edges_by_id.values()],
+        "nodes": [_node_json(n) for n in all_nodes] + business_nodes_json,
+        "edges": [_edge_json(e) for e in edges_by_id.values()] + business_edges_json,
     }
 
 

@@ -1,7 +1,10 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
+import { clsx } from "clsx";
 import { api, type CatalogNode } from "@/lib/api-client";
 import { GraphView } from "@/features/catalog-explorer/GraphView";
+import { Badge, sourceSystemBadgeVariant } from "@/components/Badge";
+import { Button } from "@/components/Button";
 
 function ResultRow({
   node,
@@ -13,22 +16,31 @@ function ResultRow({
   onSelect: (id: string) => void;
 }) {
   return (
-    <div
+    <button
       onClick={() => onSelect(node.id)}
-      className={`cursor-pointer rounded px-3 py-2 ${
-        selected ? "bg-neutral-900 text-white" : "hover:bg-neutral-50"
-      }`}
+      className={clsx(
+        "block w-full rounded-md px-3 py-2 text-left transition-colors",
+        selected ? "bg-secondary text-secondary-foreground" : "hover:bg-accent"
+      )}
     >
-      <div className="flex items-center gap-2">
-        <span className={`rounded px-1.5 py-0.5 text-xs ${selected ? "bg-white/20" : "bg-neutral-100"}`}>
+      <div className="flex items-center gap-1.5">
+        <Badge variant={selected ? "outline" : "neutral"} className={selected ? "border-secondary-foreground/30 text-secondary-foreground" : ""}>
           {node.kind}
-        </span>
-        <span className="text-sm font-medium">{node.name}</span>
+        </Badge>
+        {node.source_system && (
+          <Badge variant={sourceSystemBadgeVariant(node.source_system)}>{node.source_system}</Badge>
+        )}
+        <span className="truncate text-sm font-medium">{node.name}</span>
       </div>
-      <div className={`mt-0.5 text-xs ${selected ? "text-white/70" : "text-neutral-400"}`}>
+      <div
+        className={clsx(
+          "mt-0.5 truncate text-xs",
+          selected ? "text-secondary-foreground/70" : "text-muted-foreground"
+        )}
+      >
         {node.path}
       </div>
-    </div>
+    </button>
   );
 }
 
@@ -42,41 +54,51 @@ function formatMetadataValue(value: unknown): string {
   return `${text.slice(0, METADATA_TRUNCATE_AT)}… (${text.length} chars — this connector should be fetching long content on demand, not eagerly, if you're seeing this)`;
 }
 
+function Field({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div>
+      <div className="text-xs font-medium text-muted-foreground">{label}</div>
+      <div className="mt-1 text-sm">{children}</div>
+    </div>
+  );
+}
+
 function OverviewTab({ node }: { node: CatalogNode }) {
   const entries = Object.entries(node.attributes ?? {});
   return (
     <div className="space-y-4">
       <div className="grid grid-cols-2 gap-4">
-        <div>
-          <div className="text-xs font-medium text-neutral-500">Source</div>
-          <div className="mt-1 text-sm">
-            {node.source_system ?? "—"} / {node.source_instance_id ?? "—"}
-          </div>
-        </div>
-        <div>
-          <div className="text-xs font-medium text-neutral-500">Native id</div>
-          <div className="mt-1 font-mono text-xs">{node.native_id ?? "—"}</div>
-        </div>
+        <Field label="Source">
+          {node.source_system ? (
+            <Badge variant={sourceSystemBadgeVariant(node.source_system)}>{node.source_system}</Badge>
+          ) : (
+            "—"
+          )}{" "}
+          <span className="text-muted-foreground">{node.source_instance_id ?? ""}</span>
+        </Field>
+        <Field label="Native id">
+          <span className="font-mono text-xs">{node.native_id ?? "—"}</span>
+        </Field>
         <div className="col-span-2">
-          <div className="text-xs font-medium text-neutral-500">Path</div>
-          <div className="mt-1 font-mono text-xs text-neutral-600">{node.path}</div>
+          <Field label="Path">
+            <span className="font-mono text-xs text-muted-foreground">{node.path}</span>
+          </Field>
         </div>
-        <div>
-          <div className="text-xs font-medium text-neutral-500">Status</div>
-          <div className="mt-1 text-sm">{node.status}</div>
-        </div>
+        <Field label="Status">
+          <Badge variant="outline">{node.status}</Badge>
+        </Field>
       </div>
       <div>
-        <div className="text-xs font-medium text-neutral-500">Metadata</div>
+        <div className="text-xs font-medium text-muted-foreground">Metadata</div>
         {entries.length === 0 ? (
-          <div className="mt-1 text-sm text-neutral-400">No metadata on this node.</div>
+          <div className="mt-1 text-sm text-muted-foreground">No metadata on this node.</div>
         ) : (
           <table className="mt-1 w-full text-left text-xs">
             <tbody>
               {entries.map(([key, value]) => (
-                <tr key={key} className="border-t border-neutral-100">
-                  <td className="py-1 pr-3 align-top font-medium text-neutral-500">{key}</td>
-                  <td className="py-1 text-neutral-700">{formatMetadataValue(value)}</td>
+                <tr key={key} className="border-t border-border">
+                  <td className="py-1.5 pr-3 align-top font-medium text-muted-foreground">{key}</td>
+                  <td className="py-1.5 tabular-nums text-foreground">{formatMetadataValue(value)}</td>
                 </tr>
               ))}
             </tbody>
@@ -116,10 +138,13 @@ function AddRelationshipForm({ node, onAdded }: { node: CatalogNode; onAdded: ()
     },
   });
 
+  const inputClasses =
+    "mt-1 block w-full rounded-md border border-input bg-background px-2 py-1 text-xs text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring";
+
   return (
-    <div className="mt-2 rounded border border-dashed border-neutral-300 p-2">
+    <div className="mt-3 rounded-md border border-dashed border-border p-3">
       <div className="grid grid-cols-3 gap-2">
-        <label className="col-span-2 text-xs text-neutral-600">
+        <label className="col-span-2 text-xs text-muted-foreground">
           Search target node
           <input
             value={q}
@@ -128,16 +153,12 @@ function AddRelationshipForm({ node, onAdded }: { node: CatalogNode; onAdded: ()
               setTargetId("");
             }}
             placeholder="e.g. identity-service"
-            className="mt-1 block w-full rounded border border-neutral-300 px-2 py-1 text-xs"
+            className={inputClasses}
           />
         </label>
-        <label className="text-xs text-neutral-600">
+        <label className="text-xs text-muted-foreground">
           Relationship
-          <select
-            value={type}
-            onChange={(e) => setType(e.target.value)}
-            className="mt-1 block w-full rounded border border-neutral-300 px-2 py-1 text-xs"
-          >
+          <select value={type} onChange={(e) => setType(e.target.value)} className={inputClasses}>
             {RELATIONSHIP_TYPES.map((t) => (
               <option key={t} value={t}>
                 {t}
@@ -147,37 +168,42 @@ function AddRelationshipForm({ node, onAdded }: { node: CatalogNode; onAdded: ()
         </label>
       </div>
       {q.length > 1 && (
-        <div className="mt-1 max-h-32 overflow-auto rounded border border-neutral-200">
-          {searchQuery.isLoading && <div className="p-1 text-xs text-neutral-400">Searching…</div>}
+        <div className="mt-1 max-h-32 overflow-auto rounded-md border border-border">
+          {searchQuery.isLoading && (
+            <div className="p-1 text-xs text-muted-foreground">Searching…</div>
+          )}
           {candidates.map((c) => (
             <label
               key={c.id}
-              className="flex items-center gap-2 border-b border-neutral-100 px-2 py-1 text-xs last:border-b-0 hover:bg-neutral-50"
+              className="flex items-center gap-2 border-b border-border px-2 py-1 text-xs last:border-b-0 hover:bg-accent"
             >
               <input
                 type="radio"
                 name={`link-target-${node.id}`}
                 checked={targetId === c.id}
                 onChange={() => setTargetId(c.id)}
+                className="accent-primary"
               />
-              <span className="rounded bg-neutral-100 px-1.5 py-0.5">{c.kind}</span>
+              <Badge variant="neutral">{c.kind}</Badge>
               {c.name}
             </label>
           ))}
           {candidates.length === 0 && !searchQuery.isLoading && (
-            <div className="p-1 text-xs text-neutral-400">No matches.</div>
+            <div className="p-1 text-xs text-muted-foreground">No matches.</div>
           )}
         </div>
       )}
-      <button
+      <Button
+        variant="secondary"
+        size="sm"
         onClick={() => create.mutate()}
         disabled={create.isPending || !targetId}
-        className="mt-2 rounded border border-neutral-400 px-2 py-1 text-xs disabled:opacity-50"
+        className="mt-2"
       >
         {create.isPending ? "Adding…" : "Add relationship"}
-      </button>
+      </Button>
       {create.isError && (
-        <div className="mt-1 text-xs text-red-600">{(create.error as Error).message}</div>
+        <div className="mt-1 text-xs text-destructive">{(create.error as Error).message}</div>
       )}
     </div>
   );
@@ -203,20 +229,20 @@ function HierarchyTab({ node, onSelect }: { node: CatalogNode; onSelect: (id: st
   });
 
   return (
-    <div className="space-y-4">
+    <div className="space-y-5">
       <div>
-        <div className="text-xs font-medium text-neutral-500">Ancestors (top level first)</div>
-        <div className="mt-1 flex flex-wrap items-center gap-1 text-sm">
-          {ancestorsQuery.isLoading && <span className="text-neutral-400">Loading…</span>}
+        <div className="text-xs font-medium text-muted-foreground">Ancestors (top level first)</div>
+        <div className="mt-1.5 flex flex-wrap items-center gap-1 text-sm">
+          {ancestorsQuery.isLoading && <span className="text-muted-foreground">Loading…</span>}
           {ancestorsQuery.data?.length === 0 && (
-            <span className="text-neutral-400">This is a top-level container.</span>
+            <span className="text-muted-foreground">This is a top-level container.</span>
           )}
           {ancestorsQuery.data?.map((a, i) => (
             <span key={a.id} className="flex items-center gap-1">
-              {i > 0 && <span className="text-neutral-300">/</span>}
+              {i > 0 && <span className="text-border">/</span>}
               <button
                 onClick={() => onSelect(a.id)}
-                className="rounded bg-neutral-100 px-2 py-0.5 hover:bg-neutral-200"
+                className="rounded-md bg-muted px-2 py-0.5 text-xs font-medium text-muted-foreground hover:bg-accent hover:text-accent-foreground"
               >
                 {a.kind}: {a.name}
               </button>
@@ -226,22 +252,24 @@ function HierarchyTab({ node, onSelect }: { node: CatalogNode; onSelect: (id: st
       </div>
 
       <div>
-        <div className="text-xs font-medium text-neutral-500">
+        <div className="text-xs font-medium text-muted-foreground">
           Direct children {childrenQuery.data ? `(${childrenQuery.data.length})` : ""}
         </div>
-        {childrenQuery.isLoading && <div className="mt-1 text-sm text-neutral-400">Loading…</div>}
+        {childrenQuery.isLoading && (
+          <div className="mt-1.5 text-sm text-muted-foreground">Loading…</div>
+        )}
         {childrenQuery.data?.length === 0 && (
-          <div className="mt-1 text-sm text-neutral-400">No child nodes.</div>
+          <div className="mt-1.5 text-sm text-muted-foreground">No child nodes.</div>
         )}
         {childrenQuery.data && childrenQuery.data.length > 0 && (
-          <div className="mt-1 max-h-48 space-y-1 overflow-auto">
+          <div className="mt-1.5 max-h-48 space-y-1 overflow-auto">
             {childrenQuery.data.map((c) => (
               <button
                 key={c.id}
                 onClick={() => onSelect(c.id)}
-                className="block w-full rounded border border-neutral-200 px-2 py-1 text-left text-sm hover:bg-neutral-50"
+                className="flex w-full items-center gap-1.5 rounded-md border border-border px-2 py-1.5 text-left text-sm hover:bg-accent"
               >
-                <span className="rounded bg-neutral-100 px-1.5 py-0.5 text-xs">{c.kind}</span>{" "}
+                <Badge variant="neutral">{c.kind}</Badge>
                 {c.name}
               </button>
             ))}
@@ -250,50 +278,49 @@ function HierarchyTab({ node, onSelect }: { node: CatalogNode; onSelect: (id: st
       </div>
 
       <div>
-        <div className="text-xs font-medium text-neutral-500">
+        <div className="text-xs font-medium text-muted-foreground">
           Dependencies {linksQuery.data ? `(${linksQuery.data.length})` : ""}
         </div>
-        <div className="mt-1 text-xs text-neutral-400">
+        <div className="mt-1 text-xs text-muted-foreground">
           Links between technical assets — either extracted automatically (a mentioned "AB#123" or
           a linked pull request) or asserted manually below (e.g. "this doc documents that repo").
         </div>
-        {linksQuery.isLoading && <div className="mt-1 text-sm text-neutral-400">Loading…</div>}
+        {linksQuery.isLoading && (
+          <div className="mt-1.5 text-sm text-muted-foreground">Loading…</div>
+        )}
         {linksQuery.data?.length === 0 && (
-          <div className="mt-1 text-sm text-neutral-400">
+          <div className="mt-1.5 text-sm text-muted-foreground">
             No links found yet. If this object references a pull request, wiki page, or another
             system, make sure that entity type is included in the connection's sync and the
             target has actually been synced — a link only appears once both ends exist.
           </div>
         )}
         {linksQuery.data && linksQuery.data.length > 0 && (
-          <div className="mt-1 space-y-1">
+          <div className="mt-1.5 space-y-1">
             {linksQuery.data.map((l) => (
               <div
                 key={l.edge.id}
-                className="flex items-center justify-between rounded bg-neutral-50 px-2 py-1 text-xs"
+                className="flex items-center justify-between rounded-md bg-muted px-2 py-1.5 text-xs"
               >
-                <span>
-                  <span className="rounded bg-neutral-200 px-1.5 py-0.5">{l.edge.type}</span>{" "}
-                  {l.direction === "outgoing" ? "→" : "←"}{" "}
+                <span className="flex items-center gap-1.5">
+                  <Badge variant="outline">{l.edge.type}</Badge>
+                  <span className="text-muted-foreground">{l.direction === "outgoing" ? "→" : "←"}</span>
                   {l.node ? (
-                    <button
-                      onClick={() => onSelect(l.node!.id)}
-                      className="font-medium hover:underline"
-                    >
+                    <button onClick={() => onSelect(l.node!.id)} className="font-medium hover:underline">
                       {l.node.kind}: {l.node.name}
                     </button>
                   ) : (
-                    <span className="text-neutral-400">(unresolved target)</span>
+                    <span className="text-muted-foreground">(unresolved target)</span>
                   )}
                 </span>
                 <span className="flex items-center gap-2">
-                  <span className="text-neutral-400">
+                  <span className="text-muted-foreground">
                     {l.edge.origin} · {l.edge.state}
                   </span>
                   <button
                     onClick={() => deleteLink.mutate(l.edge.id)}
                     disabled={deleteLink.isPending}
-                    className="text-neutral-400 hover:text-red-600"
+                    className="text-muted-foreground hover:text-destructive"
                   >
                     remove
                   </button>
@@ -326,26 +353,25 @@ function DetailPanel({ node, onSelect }: { node: CatalogNode; onSelect: (id: str
   ];
 
   return (
-    <div className="rounded border border-neutral-200">
-      <div className="flex items-center justify-between border-b border-neutral-200 p-4">
+    <div className="rounded-lg border border-border bg-card">
+      <div className="flex items-center justify-between border-b border-border p-4">
         <div>
-          <div className="text-xs text-neutral-400">{node.kind}</div>
-          <div className="text-lg font-semibold">{node.name}</div>
+          <div className="text-xs text-muted-foreground">{node.kind}</div>
+          <div className="font-display text-lg text-foreground">{node.name}</div>
         </div>
-        <button
-          onClick={() => setShowGraph((v) => !v)}
-          className="rounded border border-neutral-400 px-3 py-1.5 text-sm"
-        >
+        <Button size="sm" onClick={() => setShowGraph((v) => !v)}>
           {showGraph ? "Hide full graph" : "View full graph"}
-        </button>
+        </Button>
       </div>
 
       {showGraph && (
-        <div className="border-b border-neutral-200 p-4">
-          {graphQuery.isLoading && <div className="text-sm text-neutral-500">Loading graph…</div>}
+        <div className="border-b border-border p-4">
+          {graphQuery.isLoading && (
+            <div className="text-sm text-muted-foreground">Loading graph…</div>
+          )}
           {graphQuery.data && (
             <>
-              <div className="mb-2 text-xs text-neutral-500">
+              <div className="mb-2 text-xs text-muted-foreground">
                 {graphQuery.data.nodes.length} nodes · {graphQuery.data.edges.length} edges — this
                 node's subtree plus anything cross-referenced from it, even across vendors.
               </div>
@@ -355,16 +381,17 @@ function DetailPanel({ node, onSelect }: { node: CatalogNode; onSelect: (id: str
         </div>
       )}
 
-      <div className="flex border-b border-neutral-200">
+      <div className="flex border-b border-border">
         {tabs.map((t) => (
           <button
             key={t.key}
             onClick={() => setTab(t.key)}
-            className={`px-4 py-2 text-sm ${
+            className={clsx(
+              "px-4 py-2 text-sm transition-colors",
               tab === t.key
-                ? "border-b-2 border-neutral-900 font-medium text-neutral-900"
-                : "text-neutral-500 hover:text-neutral-700"
-            }`}
+                ? "border-b-2 border-primary font-medium text-foreground"
+                : "text-muted-foreground hover:text-foreground"
+            )}
           >
             {t.label}
           </button>
@@ -407,15 +434,18 @@ export function CatalogExplorerPage() {
   });
   const selectedNode = selectedFromSearch ?? selectedNodeQuery.data ?? null;
 
+  const fieldClasses =
+    "rounded-md border border-input bg-background px-2.5 py-1.5 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring";
+
   return (
     <div className="space-y-4">
-      <h1 className="text-xl font-semibold">Asset Catalog</h1>
-      <div className="flex gap-2">
+      <h1 className="font-display text-2xl text-foreground">Asset Catalog</h1>
+      <div className="flex flex-wrap gap-2">
         <input
           placeholder="Search by name…"
           value={q}
           onChange={(e) => setQ(e.target.value)}
-          className="rounded border border-neutral-300 px-2 py-1 text-sm"
+          className={clsx(fieldClasses, "min-w-56 flex-1")}
         />
         <select
           value={sourceSystem}
@@ -423,7 +453,7 @@ export function CatalogExplorerPage() {
             setSourceSystem(e.target.value);
             setKind("");
           }}
-          className="rounded border border-neutral-300 px-2 py-1 text-sm"
+          className={fieldClasses}
         >
           <option value="">all sources</option>
           <option value="azure_devops">azure_devops</option>
@@ -431,11 +461,7 @@ export function CatalogExplorerPage() {
           <option value="confluence">confluence</option>
           <option value="jira">jira</option>
         </select>
-        <select
-          value={kind}
-          onChange={(e) => setKind(e.target.value)}
-          className="rounded border border-neutral-300 px-2 py-1 text-sm"
-        >
+        <select value={kind} onChange={(e) => setKind(e.target.value)} className={fieldClasses}>
           <option value="">all types</option>
           {(kindsQuery.data ?? []).map((k) => (
             <option key={k} value={k}>
@@ -446,28 +472,32 @@ export function CatalogExplorerPage() {
       </div>
 
       <div className="grid grid-cols-5 gap-6">
-        <div className="col-span-2 max-h-[70vh] overflow-auto rounded border border-neutral-200 p-2">
-          {searchQuery.isLoading && <div className="p-2 text-sm text-neutral-500">Loading…</div>}
+        <div className="col-span-2 max-h-[70vh] overflow-auto rounded-lg border border-border bg-card p-2">
+          {searchQuery.isLoading && (
+            <div className="p-2 text-sm text-muted-foreground">Loading…</div>
+          )}
           {searchQuery.data?.length === 0 && (
-            <div className="p-2 text-sm text-neutral-500">
+            <div className="p-2 text-sm text-muted-foreground">
               No nodes yet — sync a connector on the Connectors page first.
             </div>
           )}
-          {searchQuery.data?.map((node) => (
-            <ResultRow
-              key={node.id}
-              node={node}
-              selected={node.id === selectedId}
-              onSelect={setSelectedId}
-            />
-          ))}
+          <div className="space-y-0.5">
+            {searchQuery.data?.map((node) => (
+              <ResultRow
+                key={node.id}
+                node={node}
+                selected={node.id === selectedId}
+                onSelect={setSelectedId}
+              />
+            ))}
+          </div>
         </div>
 
         <div className="col-span-3">
           {selectedNode ? (
             <DetailPanel node={selectedNode} onSelect={setSelectedId} />
           ) : (
-            <div className="flex h-full items-center justify-center rounded border border-dashed border-neutral-300 p-8 text-sm text-neutral-400">
+            <div className="flex h-full items-center justify-center rounded-lg border border-dashed border-border p-8 text-sm text-muted-foreground">
               Select a technical asset to see its metadata, hierarchy, and dependencies.
             </div>
           )}

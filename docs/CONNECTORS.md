@@ -176,6 +176,19 @@ extension needed for this small a candidate set; embeddings live as a plain
 JSONB float array on `node.attributes` and similarity is computed in
 Python, not in SQL).
 
+**Known gap: nothing schedules this today.** `/enrich` (abstracts,
+embeddings, and — for Confluence — the LLM-inferred relationships below)
+is reachable only by calling the endpoint directly; there is no UI button
+for it anywhere in `ui/src`, and `synchronization/scheduler.py`'s own
+15-minute interval loop runs sync only and never calls `/enrich`. Content-
+hash gating means a call is cheap to repeat (unchanged documents are
+skipped, not re-sent to the model), so the natural shape for freshness is
+a nightly scheduled call per live connection — either a second interval
+loop alongside the existing sync one in `synchronization/scheduler.py`, or
+an external cron hitting the endpoint — not yet built either way. Until
+one exists, search-quality enrichment and LLM-inferred relationships only
+ever reflect whatever was last triggered by hand.
+
 ## Anti-leakage test
 
 `tests/acceptance/` includes a test that walks every public method on every

@@ -1,5 +1,6 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { BrowserRouter, Link, Navigate, Route, Routes, useLocation } from "react-router-dom";
+import { clsx } from "clsx";
 import { ConnectorsPage } from "@/features/connectors/ConnectorsPage";
 import { CatalogExplorerPage } from "@/features/catalog-explorer/CatalogExplorerPage";
 import { BusinessTreePage } from "@/features/org-tree/BusinessTreePage";
@@ -18,9 +19,12 @@ function NavLink({ to, label }: { to: string; label: string }) {
   return (
     <Link
       to={to}
-      className={`block rounded px-3 py-2 text-sm ${
-        active ? "bg-neutral-900 text-white" : "text-neutral-700 hover:bg-neutral-100"
-      }`}
+      className={clsx(
+        "block rounded-md px-3 py-2 text-sm font-medium transition-colors",
+        active
+          ? "bg-sidebar-primary text-sidebar-primary-foreground"
+          : "text-sidebar-foreground/80 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
+      )}
     >
       {label}
     </Link>
@@ -29,9 +33,9 @@ function NavLink({ to, label }: { to: string; label: string }) {
 
 function Shell() {
   return (
-    <div className="flex h-screen">
-      <aside className="w-56 shrink-0 border-r border-neutral-200 p-4">
-        <div className="mb-6 text-lg font-semibold">Context Fabric</div>
+    <div className="flex h-screen bg-background text-foreground">
+      <aside className="flex w-56 shrink-0 flex-col gap-6 border-r border-sidebar-border bg-sidebar p-4 text-sidebar-foreground">
+        <div className="font-display text-lg tracking-tight">Context Fabric</div>
         <nav className="space-y-1">
           <NavLink to="/search" label="Search" />
           <NavLink to="/business" label="Business Hierarchy" />

@@ -24,9 +24,8 @@ context-pack retrieval, the Context MCP server, the REST API, and the UI
 (catalog explorer, enterprise graph, proposed-links review queue, workflow
 templates) are all implemented and covered by the test suite.
 
-`docs/PROGRESS.md`'s phase-by-phase tracker stops updating at Phase 9 and
-is stale relative to the code — treat it as historical, not current status,
-until it's audited and brought back in sync.
+See `docs/adr/` for the decision records behind the design, and
+`docs/architecture.md`/`docs/DOMAIN_MODEL.md` for the system as built.
 
 ## Layout
 

@@ -1,55 +1,82 @@
 import cytoscape from "cytoscape";
 import { useEffect, useRef, useState } from "react";
+import { clsx } from "clsx";
 import type { CatalogGraph, CatalogNode } from "@/lib/api-client";
+import { Button } from "@/components/Button";
+
+// Graph-canvas colors read from the Emagine token values directly (Cytoscape
+// paints to a <canvas>, which can't consume CSS custom properties or
+// Tailwind classes) so the graph stays visually literate with the rest of
+// the page instead of running its own unrelated hex palette. Node-kind and
+// source-system each get their own ramp built from the same OKLCH family as
+// the design system's status-* hues (consistent L≈0.5-0.68, C≈0.13-0.2,
+// hue stepped around the wheel) — light-mode literal, matching the rest of
+// this app until a dark-mode toggle actually exists.
+const TOKEN = {
+  ink: "oklch(0.197 0.005 145.4)",
+  charcoal: "oklch(0.314 0.011 145.3)",
+  charcoalRaised: "oklch(0.366 0.015 145.3)",
+  charcoalDeep: "oklch(0.27 0.012 145.2)",
+  background: "oklch(1 0 0)",
+  border: "oklch(0.919 0 89.9)",
+  muted: "oklch(0.967 0 89.9)",
+  mutedForeground: "oklch(0.539 0.01 145.4)",
+  destructive: "oklch(0.597 0.182 24.5)",
+  statusBlue: "oklch(0.55 0.18 255)",
+  statusViolet: "oklch(0.55 0.2 300)",
+  statusAmber: "oklch(0.65 0.16 70)",
+};
 
 const KIND_COLOR: Record<string, string> = {
-  PROJECT: "#1d4ed8",
-  ORGANIZATION: "#1d4ed8",
-  AREA_PATH: "#0891b2",
-  GIT_REPOSITORY: "#7c3aed",
-  REPOSITORY: "#7c3aed",
-  BRANCH: "#a855f7",
-  WIKI_PAGE: "#059669",
-  PULL_REQUEST: "#dc2626",
-  ISSUE: "#ea580c",
-  PROJECT_BOARD: "#0f766e",
-  PROJECT_ITEM: "#14b8a6",
-  EPIC: "#9333ea",
-  FEATURE: "#4f46e5",
-  STORY: "#2563eb",
-  TASK: "#0284c7",
-  BUG: "#dc2626",
-  WORK_ITEM: "#64748b",
-  SPACE: "#1d4ed8",
-  PAGE: "#059669",
-  ATTACHMENT: "#a16207",
-  COMMENT: "#65a30d",
+  PROJECT: TOKEN.statusBlue,
+  ORGANIZATION: TOKEN.statusBlue,
+  AREA_PATH: "oklch(0.6 0.14 195)",
+  GIT_REPOSITORY: TOKEN.statusViolet,
+  REPOSITORY: TOKEN.statusViolet,
+  BRANCH: "oklch(0.68 0.16 300)",
+  WIKI_PAGE: "oklch(0.6 0.15 150)",
+  PULL_REQUEST: TOKEN.destructive,
+  ISSUE: "oklch(0.65 0.17 45)",
+  PROJECT_BOARD: "oklch(0.5 0.1 195)",
+  PROJECT_ITEM: "oklch(0.68 0.12 175)",
+  EPIC: "oklch(0.5 0.18 290)",
+  FEATURE: "oklch(0.55 0.16 265)",
+  STORY: "oklch(0.58 0.16 250)",
+  TASK: "oklch(0.62 0.13 220)",
+  BUG: TOKEN.destructive,
+  WORK_ITEM: "oklch(0.6 0.02 145)",
+  SPACE: TOKEN.statusBlue,
+  PAGE: "oklch(0.6 0.15 150)",
+  ATTACHMENT: TOKEN.statusAmber,
+  COMMENT: "oklch(0.62 0.14 130)",
   // Business layer + the synthesized logical-layer node (Enterprise
-  // Context Graph, docs/UI.md).
-  ORG: "#0f172a",
-  DIVISION: "#1e293b",
-  TRIBE: "#334155",
-  SQUAD: "#475569",
-  TEAM: "#475569",
-  PRODUCT: "#7c2d92",
-  SERVICE: "#a21caf",
-  CONTEXT_SPACE: "#ca8a04",
+  // Context Graph, docs/UI.md) — the brand's own charcoal/ink ramp, so
+  // "this came from the org tree, not a vendor" reads at a glance.
+  ORG: TOKEN.ink,
+  DIVISION: TOKEN.charcoalDeep,
+  TRIBE: TOKEN.charcoal,
+  SQUAD: TOKEN.charcoalRaised,
+  TEAM: TOKEN.charcoalRaised,
+  PRODUCT: "oklch(0.5 0.19 330)",
+  SERVICE: "oklch(0.55 0.2 320)",
+  CONTEXT_SPACE: TOKEN.statusAmber,
 };
-const DEFAULT_COLOR = "#94a3b8";
+const DEFAULT_COLOR = TOKEN.mutedForeground;
 
 // One color per vendor, for "color by system" mode — a real user ask:
 // coloring by kind (STORY vs. PULL_REQUEST vs. PAGE) makes same-kind
 // nodes easy to spot but says nothing about which vendor a node came
 // from, which is exactly what matters when the question is "does this
-// relationship actually cross systems." Picked for maximum contrast
-// against each other and against KIND_COLOR's cooler blues/purples, not
-// for brand fidelity.
+// relationship actually cross systems." Reuses the design system's three
+// status hues for the first three vendors and extends the same OKLCH
+// family with two more (teal, magenta) for the rest — the token set only
+// names three, and the graph needs one per connector.
 const SOURCE_SYSTEM_COLOR: Record<string, string> = {
-  azure_devops: "#0078D4",
-  github: "#7c3aed",
-  jira: "#16a34a",
-  confluence: "#ea580c",
-  teams: "#0ea5e9",
+  azure_devops: TOKEN.statusBlue,
+  github: TOKEN.statusViolet,
+  jira: TOKEN.statusAmber,
+  confluence: "oklch(0.6 0.14 190)",
+  teams: "oklch(0.58 0.16 350)",
 };
 const SOURCE_SYSTEM_LABELS: Record<string, string> = {
   azure_devops: "Azure DevOps",
@@ -62,15 +89,71 @@ const SOURCE_SYSTEM_LABELS: Record<string, string> = {
 // "bound to" node search draws) carry no source_system at all — they
 // aren't vendor data, so they get their own neutral color rather than
 // falling into DEFAULT_COLOR and looking like an unrecognized kind.
-const NO_SOURCE_SYSTEM_COLOR = "#0f172a";
+const NO_SOURCE_SYSTEM_COLOR = TOKEN.ink;
 
 const EDGE_COLOR: Record<string, string> = {
-  CONTAINS: "#cbd5e1",
-  MENTIONS: "#f59e0b",
-  RELATED_TO: "#ec4899",
-  HAS_CONTEXT_SPACE: "#ca8a04",
-  BINDS: "#0891b2",
+  CONTAINS: TOKEN.border,
+  MENTIONS: TOKEN.statusAmber,
+  RELATED_TO: "oklch(0.6 0.18 340)",
+  HAS_CONTEXT_SPACE: "oklch(0.55 0.15 70)",
+  BINDS: "oklch(0.55 0.14 195)",
 };
+
+// Cytoscape paints to a raw <canvas>, and this environment's Canvas2D
+// fillStyle parser doesn't accept oklch() the way CSS/DOM styling does
+// (confirmed live: the DOM color swatches in this same file render fine,
+// every canvas node/edge came back solid black). Resolving through
+// getComputedStyle first was tried and didn't help — modern browsers
+// preserve oklch() as the *computed* value too rather than collapsing it
+// to rgb(), so canvas received the same unparseable string either way.
+// This does the OKLCH→linear-sRGB→sRGB math directly (Björn Ottosson's
+// published oklab conversion) and hands canvas a plain rgb() string, which
+// every Canvas2D implementation accepts regardless of Color-4 support.
+const resolvedColorCache = new Map<string, string>();
+function toCanvasColor(cssColor: string): string {
+  const cached = resolvedColorCache.get(cssColor);
+  if (cached) return cached;
+
+  const match = cssColor.match(/oklch\(\s*([\d.]+)\s+([\d.]+)\s+([\d.]+)/);
+  if (!match) {
+    resolvedColorCache.set(cssColor, cssColor);
+    return cssColor;
+  }
+  const L = parseFloat(match[1]);
+  const C = parseFloat(match[2]);
+  const H = (parseFloat(match[3]) * Math.PI) / 180;
+
+  const a = C * Math.cos(H);
+  const b = C * Math.sin(H);
+
+  const l_ = L + 0.3963377774 * a + 0.2158037573 * b;
+  const m_ = L - 0.1055613458 * a - 0.0638541728 * b;
+  const s_ = L - 0.0894841775 * a - 1.2914855480 * b;
+
+  const l = l_ ** 3;
+  const m = m_ ** 3;
+  const s = s_ ** 3;
+
+  const rLin = 4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s;
+  const gLin = -1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s;
+  const bLin = -0.0041960863 * l - 0.7034186147 * m + 1.7076147010 * s;
+
+  const gamma = (v: number) => {
+    const clamped = Math.max(0, Math.min(1, v));
+    return clamped <= 0.0031308 ? 12.92 * clamped : 1.055 * Math.pow(clamped, 1 / 2.4) - 0.055;
+  };
+
+  const r = Math.round(gamma(rLin) * 255);
+  const g = Math.round(gamma(gLin) * 255);
+  const bl = Math.round(gamma(bLin) * 255);
+
+  const resolved = `rgb(${r}, ${g}, ${bl})`;
+  resolvedColorCache.set(cssColor, resolved);
+  return resolved;
+}
+function resolveColorMap(map: Record<string, string>): Record<string, string> {
+  return Object.fromEntries(Object.entries(map).map(([k, v]) => [k, toCanvasColor(v)]));
+}
 
 function edgeLabel(type: string): string {
   return type.toLowerCase().replaceAll("_", " ");
@@ -115,23 +198,32 @@ interface ClusterInfo {
 type ColorMode = "kind" | "system";
 
 function buildStylesheet(rootId?: string, colorBy: ColorMode = "kind"): cytoscape.StylesheetCSS[] {
+  const c = Object.fromEntries(
+    Object.entries(TOKEN).map(([k, v]) => [k, toCanvasColor(v)])
+  ) as typeof TOKEN;
+  const resolvedKindColor = resolveColorMap(KIND_COLOR);
+  const resolvedSourceSystemColor = resolveColorMap(SOURCE_SYSTEM_COLOR);
+  const resolvedEdgeColor = resolveColorMap(EDGE_COLOR);
+  const resolvedDefault = toCanvasColor(DEFAULT_COLOR);
+  const resolvedNoSourceSystem = toCanvasColor(NO_SOURCE_SYSTEM_COLOR);
+
   const nodeColorStyles: cytoscape.StylesheetCSS[] =
     colorBy === "system"
       ? [
-          ...Object.entries(SOURCE_SYSTEM_COLOR).map(([system, color]) => ({
+          ...Object.entries(resolvedSourceSystemColor).map(([system, color]) => ({
             selector: `node[sourceSystem = "${system}"]`,
             css: { "background-color": color },
           })),
           {
             selector: 'node[sourceSystem = ""]',
-            css: { "background-color": NO_SOURCE_SYSTEM_COLOR },
+            css: { "background-color": resolvedNoSourceSystem },
           },
         ]
-      : Object.entries(KIND_COLOR).map(([kind, color]) => ({
+      : Object.entries(resolvedKindColor).map(([kind, color]) => ({
           selector: `node[kind = "${kind}"]`,
           css: { "background-color": color },
         }));
-  const edgeStyles: cytoscape.StylesheetCSS[] = Object.entries(EDGE_COLOR).map(
+  const edgeStyles: cytoscape.StylesheetCSS[] = Object.entries(resolvedEdgeColor).map(
     ([type, color]) => ({
       selector: `edge[type = "${type}"]`,
       css: { "line-color": color, "target-arrow-color": color },
@@ -141,18 +233,19 @@ function buildStylesheet(rootId?: string, colorBy: ColorMode = "kind"): cytoscap
     {
       selector: "node",
       css: {
-        "background-color": DEFAULT_COLOR,
+        "background-color": resolvedDefault,
         width: "data(size)",
         height: "data(size)",
         "border-width": 1,
-        "border-color": "#ffffff",
+        "border-color": c.background,
         label: "data(label)",
         "font-size": 8,
+        "font-family": "DM Sans, sans-serif",
         "text-valign": "bottom",
         "text-halign": "center",
         "text-margin-y": 3,
-        color: "#334155",
-        "text-background-color": "#ffffff",
+        color: c.mutedForeground,
+        "text-background-color": c.background,
         "text-background-opacity": 1,
         "text-background-padding": "2px",
       } as cytoscape.Css.Node,
@@ -162,8 +255,8 @@ function buildStylesheet(rootId?: string, colorBy: ColorMode = "kind"): cytoscap
       selector: "edge",
       css: {
         width: 1,
-        "line-color": "#cbd5e1",
-        "target-arrow-color": "#cbd5e1",
+        "line-color": c.border,
+        "target-arrow-color": c.border,
         "target-arrow-shape": "none",
         "curve-style": "bezier",
         opacity: 0.5,
@@ -178,9 +271,10 @@ function buildStylesheet(rootId?: string, colorBy: ColorMode = "kind"): cytoscap
         "target-arrow-shape": "triangle",
         label: "data(label)",
         "font-size": 7,
+        "font-family": "DM Sans, sans-serif",
         "text-rotation": "autorotate",
-        color: "#334155",
-        "text-background-color": "#ffffff",
+        color: c.mutedForeground,
+        "text-background-color": c.background,
         "text-background-opacity": 1,
         "text-background-padding": "2px",
       } as cytoscape.Css.Edge,
@@ -189,21 +283,21 @@ function buildStylesheet(rootId?: string, colorBy: ColorMode = "kind"): cytoscap
       ? [
           {
             selector: `node[id = "${rootId}"]`,
-            css: { "border-width": 3, "border-color": "#0f172a" },
+            css: { "border-width": 3, "border-color": c.ink },
           } as cytoscape.StylesheetCSS,
         ]
       : []),
     {
       selector: "node.hovered",
-      css: { "border-width": 3, "border-color": "#0f172a" },
+      css: { "border-width": 3, "border-color": c.ink },
     },
     {
       selector: "node.cluster",
       css: {
         shape: "round-rectangle",
-        "background-color": "#e2e8f0",
+        "background-color": c.muted,
         "border-width": 2,
-        "border-color": "#64748b",
+        "border-color": c.mutedForeground,
         "border-style": "dashed",
       },
     },
@@ -220,7 +314,7 @@ function buildStylesheet(rootId?: string, colorBy: ColorMode = "kind"): cytoscap
     },
     {
       selector: "node.highlighted",
-      css: { "border-width": 3, "border-color": "#0f172a", opacity: 1 },
+      css: { "border-width": 3, "border-color": c.ink, opacity: 1 },
     },
     {
       selector: "edge.highlighted",
@@ -590,61 +684,61 @@ export function GraphView({
       <div className="flex-1">
         <div className="mb-2 flex flex-wrap items-center gap-3 text-xs">
           <span className="flex items-center gap-1.5">
-            <span className="text-neutral-400">Layout:</span>
+            <span className="text-muted-foreground">Layout:</span>
             {(Object.keys(LAYOUT_LABELS) as LayoutMode[]).map((mode) => (
-              <button
+              <Button
                 key={mode}
+                size="sm"
+                active={layoutMode === mode}
                 onClick={() => setLayoutMode(mode)}
-                className={`rounded px-2 py-0.5 ${
-                  layoutMode === mode ? "bg-neutral-900 text-white" : "bg-neutral-100 text-neutral-600"
-                }`}
+                className="h-6 px-2"
               >
                 {LAYOUT_LABELS[mode]}
-              </button>
+              </Button>
             ))}
           </span>
-          <button
+          <Button
+            size="sm"
+            active={!groupingEnabled}
             onClick={() => setGroupingEnabled((v) => !v)}
-            className={`rounded px-2 py-0.5 ${
-              groupingEnabled ? "bg-neutral-100 text-neutral-600" : "bg-neutral-900 text-white"
-            }`}
+            className="h-6 px-2"
             title='Large same-kind sibling groups (e.g. "32 × Task") collapse into one box by default — turn off to always show every node individually.'
           >
             {groupingEnabled ? "Group large sets" : "Showing all individually"}
-          </button>
+          </Button>
           <span className="flex items-center gap-1.5">
-            <span className="text-neutral-400">Color by:</span>
+            <span className="text-muted-foreground">Color by:</span>
             {(["kind", "system"] as ColorMode[]).map((mode) => (
-              <button
+              <Button
                 key={mode}
+                size="sm"
+                active={colorMode === mode}
                 onClick={() => setColorMode(mode)}
-                className={`rounded px-2 py-0.5 ${
-                  colorMode === mode ? "bg-neutral-900 text-white" : "bg-neutral-100 text-neutral-600"
-                }`}
+                className="h-6 px-2"
               >
                 {mode === "kind" ? "Kind" : "System"}
-              </button>
+              </Button>
             ))}
           </span>
         </div>
         <div className="relative">
-          <div ref={containerRef} className="h-[520px] w-full rounded border border-neutral-200 bg-white" />
-          <div className="pointer-events-none absolute bottom-2 left-2 rounded bg-white/90 px-2 py-1 text-xs text-neutral-700 shadow">
+          <div ref={containerRef} className="h-[520px] w-full rounded-lg border border-border bg-card" />
+          <div className="pointer-events-none absolute bottom-2 left-2 rounded-md bg-popover/90 px-2 py-1 text-xs text-popover-foreground shadow-sm">
             {hovered ? (
               <>
                 <span className="font-medium">{hovered.kind}</span>: {hovered.name}
               </>
             ) : (
-              <span className="text-neutral-400">
+              <span className="text-muted-foreground">
                 Hover for a name · click to highlight its connections (click empty space to clear)
                 · scroll to zoom
               </span>
             )}
           </div>
         </div>
-        <div className="mt-2 flex flex-wrap gap-3 text-xs text-neutral-500">
+        <div className="mt-2 flex flex-wrap gap-3 text-xs text-muted-foreground">
           {edgeTypesPresent.map((type) => {
-            const color = EDGE_COLOR[type] ?? "#cbd5e1";
+            const color = EDGE_COLOR[type] ?? TOKEN.border;
             return (
               <span key={type} className="flex items-center gap-1">
                 {type === "CONTAINS" ? (
@@ -661,7 +755,7 @@ export function GraphView({
           })}
         </div>
         {colorMode === "system" && (
-          <div className="mt-2 flex flex-wrap gap-3 text-xs text-neutral-500">
+          <div className="mt-2 flex flex-wrap gap-3 text-xs text-muted-foreground">
             {systemsPresent.map((system) => (
               <span key={system} className="flex items-center gap-1.5">
                 <span
@@ -679,13 +773,13 @@ export function GraphView({
           </div>
         )}
       </div>
-      <div className="w-44 shrink-0 rounded border border-neutral-200 p-2">
-        <div className="mb-1 flex items-center justify-between text-xs font-medium text-neutral-500">
+      <div className="w-44 shrink-0 rounded-lg border border-border bg-card p-2">
+        <div className="mb-1 flex items-center justify-between text-xs font-medium text-muted-foreground">
           <span>Filter by kind</span>
           {hiddenKinds.size > 0 && (
             <button
               onClick={() => setHiddenKinds(new Set())}
-              className="text-neutral-400 hover:text-neutral-700"
+              className="text-muted-foreground hover:text-foreground"
             >
               reset
             </button>
@@ -698,14 +792,15 @@ export function GraphView({
               <button
                 key={kind}
                 onClick={() => toggleKind(kind)}
-                className={`flex w-full items-center gap-1.5 rounded px-1 py-0.5 text-left text-xs hover:bg-neutral-50 ${
-                  hidden ? "text-neutral-300" : "text-neutral-600"
-                }`}
+                className={clsx(
+                  "flex w-full items-center gap-1.5 rounded-md px-1 py-0.5 text-left text-xs hover:bg-accent",
+                  hidden ? "text-muted-foreground/50" : "text-muted-foreground"
+                )}
                 title={hidden ? "Hidden — click to show" : "Shown — click to hide"}
               >
                 <span
                   className="inline-block h-2.5 w-2.5 shrink-0 rounded-full"
-                  style={{ backgroundColor: hidden ? "#e5e7eb" : (KIND_COLOR[kind] ?? DEFAULT_COLOR) }}
+                  style={{ backgroundColor: hidden ? TOKEN.border : (KIND_COLOR[kind] ?? DEFAULT_COLOR) }}
                 />
                 <span className={hidden ? "line-through" : ""}>{kindLabel(kind)}</span>
               </button>
